@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import random
 from collections import deque
 from dataclasses import dataclass
@@ -86,10 +87,11 @@ def epsilon_by_step(step: int, cfg: Config) -> float:
     return cfg.epsilon_start + ratio * (cfg.epsilon_end - cfg.epsilon_start)
 
 
-def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: int = 20) -> tuple[float, float]:
+def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: int = 20) -> tuple[float, float, float]:
     env = gym.make(env_id)
     returns = []
     successes = 0
+    steps = []
 
     for _ in range(episodes):
         obs, _ = env.reset()
@@ -97,6 +99,7 @@ def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: in
         done = False
         truncated = False
         ep_ret = 0.0
+        ep_steps = 0
 
         while not (done or truncated):
             with torch.no_grad():
@@ -105,19 +108,38 @@ def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: in
 
             next_obs, reward, done, truncated, _ = env.step(action)
             ep_ret += reward
+            ep_steps += 1
             obs = preprocess_obs(next_obs)
 
         returns.append(ep_ret)
+        steps.append(ep_steps)
         if ep_ret > 0:
             successes += 1
 
     env.close()
-    return float(np.mean(returns)), successes / episodes
+    return float(np.mean(returns)), successes / episodes, float(np.mean(steps))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train Double DQN on MiniWorld FourRooms")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--total-steps", type=int, default=200_000)
+    parser.add_argument("--eval-every", type=int, default=20_000)
+    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--run-name", type=str, default=None)
+    return parser.parse_args()
 
 
 def main() -> None:
-    cfg = Config()
+    args = parse_args()
+
+    cfg = Config(
+        seed=args.seed,
+        total_steps=args.total_steps,
+        eval_every=args.eval_every,
+    )
     env_id = "MiniWorld-FourRooms-v0"
+    run_name = args.run_name or f"seed_{cfg.seed}"
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -142,7 +164,7 @@ def main() -> None:
     output_dir = Path("outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rewards_log: List[tuple[int, float, float]] = []
+    rewards_log: List[tuple[int, float, float, float]] = []
 
     episode_reward = 0.0
     progress = trange(1, cfg.total_steps + 1, desc="DDQN training")
@@ -198,8 +220,13 @@ def main() -> None:
             q_target.load_state_dict(q_online.state_dict())
 
         if step % cfg.eval_every == 0:
-            mean_ret, success_rate = evaluate_policy(env_id, q_online, device, episodes=20)
-            rewards_log.append((step, mean_ret, success_rate))
+            mean_ret, success_rate, mean_steps = evaluate_policy(
+                env_id,
+                q_online,
+                device,
+                episodes=args.eval_episodes,
+            )
+            rewards_log.append((step, mean_ret, success_rate, mean_steps))
             progress.set_postfix(
                 eps=f"{epsilon:.3f}",
                 eval_return=f"{mean_ret:.3f}",
@@ -208,14 +235,22 @@ def main() -> None:
 
     env.close()
 
-    torch.save(q_online.state_dict(), output_dir / "ddqn_fourrooms.pt")
+    torch.save(q_online.state_dict(), output_dir / f"ddqn_{run_name}.pt")
 
     if rewards_log:
         np.savetxt(
             output_dir / "ddqn_eval_log.csv",
             np.array(rewards_log),
             delimiter=",",
-            header="step,mean_return,success_rate",
+            header="step,mean_return,success_rate,mean_steps",
+            comments="",
+        )
+
+        np.savetxt(
+            output_dir / f"ddqn_{run_name}_eval_log.csv",
+            np.array(rewards_log),
+            delimiter=",",
+            header="step,mean_return,success_rate,mean_steps",
             comments="",
         )
 

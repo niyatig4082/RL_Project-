@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Deque, List, Tuple
 
 import gymnasium as gym
+import miniworld
 import numpy as np
 import torch
 import torch.nn as nn
@@ -19,10 +20,10 @@ Transition = Tuple[np.ndarray, int, float, np.ndarray, bool]
 
 
 class QNet(nn.Module):
-    def __init__(self, action_dim: int) -> None:
+    def __init__(self, action_dim: int, in_channels: int = 3) -> None:
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4),
+            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
@@ -47,17 +48,22 @@ class QNet(nn.Module):
 class Config:
     total_steps: int = 200_000
     gamma: float = 0.99
-    lr: float = 1e-4
-    batch_size: int = 64
-    buffer_size: int = 100_000
-    learning_starts: int = 5_000
+    lr: float = 2.5e-4
+    batch_size: int = 128
+    buffer_size: int = 200_000
+    learning_starts: int = 2_000
     train_freq: int = 4
-    target_update_freq: int = 5_000
+    target_update_freq: int = 2_000
     epsilon_start: float = 1.0
-    epsilon_end: float = 0.05
-    epsilon_decay_fraction: float = 0.2
+    epsilon_end: float = 0.02
+    epsilon_decay_fraction: float = 0.5
     eval_every: int = 20_000
     seed: int = 42
+    frame_stack: int = 1
+    prioritized_replay: bool = False
+    per_alpha: float = 0.6
+    per_beta_start: float = 0.4
+    per_beta_end: float = 1.0
 
 
 class ReplayBuffer:
@@ -74,9 +80,55 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity: int, alpha: float) -> None:
+        self.capacity = capacity
+        self.alpha = alpha
+        self.buffer: List[Transition] = []
+        self.priorities: List[float] = []
+        self.pos = 0
+
+    def add(self, transition: Transition) -> None:
+        max_prio = max(self.priorities) if self.priorities else 1.0
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(transition)
+            self.priorities.append(max_prio)
+        else:
+            self.buffer[self.pos] = transition
+            self.priorities[self.pos] = max_prio
+            self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size: int, beta: float) -> tuple[List[Transition], np.ndarray, np.ndarray]:
+        prios = np.asarray(self.priorities, dtype=np.float32)
+        probs = prios**self.alpha
+        probs /= probs.sum()
+
+        idxs = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[i] for i in idxs]
+
+        weights = (len(self.buffer) * probs[idxs]) ** (-beta)
+        weights /= weights.max()
+        return samples, idxs, weights.astype(np.float32)
+
+    def update_priorities(self, idxs: np.ndarray, priorities: np.ndarray) -> None:
+        for i, p in zip(idxs, priorities):
+            self.priorities[int(i)] = float(max(p, 1e-6))
+
+    def __len__(self) -> int:
+        return len(self.buffer)
+
+
 def preprocess_obs(obs: np.ndarray) -> np.ndarray:
     # Convert HWC -> CHW for convolutional network consumption
     return np.transpose(obs, (2, 0, 1)).astype(np.uint8)
+
+
+def init_stacked_obs(first_obs: np.ndarray, n_stack: int) -> tuple[deque[np.ndarray], np.ndarray]:
+    queue: deque[np.ndarray] = deque(maxlen=n_stack)
+    for _ in range(n_stack):
+        queue.append(first_obs)
+    stacked = np.concatenate(list(queue), axis=0)
+    return queue, stacked
 
 
 def epsilon_by_step(step: int, cfg: Config) -> float:
@@ -87,7 +139,13 @@ def epsilon_by_step(step: int, cfg: Config) -> float:
     return cfg.epsilon_start + ratio * (cfg.epsilon_end - cfg.epsilon_start)
 
 
-def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: int = 20) -> tuple[float, float, float]:
+def evaluate_policy(
+    env_id: str,
+    q_net: QNet,
+    device: torch.device,
+    frame_stack: int,
+    episodes: int = 20,
+) -> tuple[float, float, float]:
     env = gym.make(env_id)
     returns = []
     successes = 0
@@ -95,7 +153,8 @@ def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: in
 
     for _ in range(episodes):
         obs, _ = env.reset()
-        obs = preprocess_obs(obs)
+        first_obs = preprocess_obs(obs)
+        frame_queue, obs = init_stacked_obs(first_obs, frame_stack)
         done = False
         truncated = False
         ep_ret = 0.0
@@ -109,7 +168,8 @@ def evaluate_policy(env_id: str, q_net: QNet, device: torch.device, episodes: in
             next_obs, reward, done, truncated, _ = env.step(action)
             ep_ret += reward
             ep_steps += 1
-            obs = preprocess_obs(next_obs)
+            frame_queue.append(preprocess_obs(next_obs))
+            obs = np.concatenate(list(frame_queue), axis=0)
 
         returns.append(ep_ret)
         steps.append(ep_steps)
@@ -127,6 +187,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--lr", type=float, default=2.5e-4)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--buffer-size", type=int, default=200_000)
+    parser.add_argument("--learning-starts", type=int, default=2_000)
+    parser.add_argument("--train-freq", type=int, default=4)
+    parser.add_argument("--target-update-freq", type=int, default=2_000)
+    parser.add_argument("--epsilon-start", type=float, default=1.0)
+    parser.add_argument("--epsilon-end", type=float, default=0.02)
+    parser.add_argument("--epsilon-decay-fraction", type=float, default=0.5)
+    parser.add_argument("--frame-stack", type=int, default=1)
+    parser.add_argument("--prioritized-replay", action="store_true")
+    parser.add_argument("--per-alpha", type=float, default=0.6)
+    parser.add_argument("--per-beta-start", type=float, default=0.4)
+    parser.add_argument("--per-beta-end", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -137,6 +211,20 @@ def main() -> None:
         seed=args.seed,
         total_steps=args.total_steps,
         eval_every=args.eval_every,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        buffer_size=args.buffer_size,
+        learning_starts=args.learning_starts,
+        train_freq=args.train_freq,
+        target_update_freq=args.target_update_freq,
+        epsilon_start=args.epsilon_start,
+        epsilon_end=args.epsilon_end,
+        epsilon_decay_fraction=args.epsilon_decay_fraction,
+        frame_stack=args.frame_stack,
+        prioritized_replay=args.prioritized_replay,
+        per_alpha=args.per_alpha,
+        per_beta_start=args.per_beta_start,
+        per_beta_end=args.per_beta_end,
     )
     env_id = "MiniWorld-FourRooms-v0"
     run_name = args.run_name or f"seed_{cfg.seed}"
@@ -149,17 +237,31 @@ def main() -> None:
 
     env = gym.make(env_id)
     obs, _ = env.reset(seed=cfg.seed)
-    obs = preprocess_obs(obs)
+    first_obs = preprocess_obs(obs)
+    frame_queue, obs = init_stacked_obs(first_obs, cfg.frame_stack)
 
     action_dim = env.action_space.n
+    in_channels = 3 * cfg.frame_stack
 
-    q_online = QNet(action_dim).to(device)
-    q_target = QNet(action_dim).to(device)
+    effective_learning_starts = min(cfg.learning_starts, max(100, cfg.total_steps // 4))
+    if effective_learning_starts != cfg.learning_starts:
+        print(
+            "[info] Adjusted learning_starts "
+            f"from {cfg.learning_starts} to {effective_learning_starts} "
+            "to ensure updates occur within the training budget."
+        )
+
+    q_online = QNet(action_dim, in_channels=in_channels).to(device)
+    q_target = QNet(action_dim, in_channels=in_channels).to(device)
     q_target.load_state_dict(q_online.state_dict())
     q_target.eval()
 
     optimizer = optim.Adam(q_online.parameters(), lr=cfg.lr)
-    replay = ReplayBuffer(cfg.buffer_size)
+    replay = (
+        PrioritizedReplayBuffer(cfg.buffer_size, cfg.per_alpha)
+        if cfg.prioritized_replay
+        else ReplayBuffer(cfg.buffer_size)
+    )
 
     output_dir = Path("outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -180,7 +282,8 @@ def main() -> None:
                 action = int(torch.argmax(q_online(obs_t), dim=1).item())
 
         next_obs, reward, done, truncated, _ = env.step(action)
-        next_obs = preprocess_obs(next_obs)
+        frame_queue.append(preprocess_obs(next_obs))
+        next_obs = np.concatenate(list(frame_queue), axis=0)
         terminal = bool(done or truncated)
 
         replay.add((obs, action, reward, next_obs, terminal))
@@ -189,11 +292,21 @@ def main() -> None:
 
         if terminal:
             obs, _ = env.reset()
-            obs = preprocess_obs(obs)
+            first_obs = preprocess_obs(obs)
+            frame_queue, obs = init_stacked_obs(first_obs, cfg.frame_stack)
             episode_reward = 0.0
 
-        if step >= cfg.learning_starts and step % cfg.train_freq == 0 and len(replay) >= cfg.batch_size:
-            batch = replay.sample(cfg.batch_size)
+        if step >= effective_learning_starts and step % cfg.train_freq == 0 and len(replay) >= cfg.batch_size:
+            if cfg.prioritized_replay:
+                beta_ratio = step / max(1, cfg.total_steps)
+                beta = cfg.per_beta_start + beta_ratio * (cfg.per_beta_end - cfg.per_beta_start)
+                batch, idxs, is_weights = replay.sample(cfg.batch_size, beta=beta)
+                w_t = torch.from_numpy(is_weights).to(device).unsqueeze(1)
+            else:
+                batch = replay.sample(cfg.batch_size)
+                idxs = None
+                w_t = None
+
             obs_b, act_b, rew_b, next_obs_b, done_b = zip(*batch)
 
             obs_t = torch.from_numpy(np.stack(obs_b)).to(device)
@@ -210,7 +323,14 @@ def main() -> None:
                 next_q = q_target(next_obs_t).gather(1, next_actions)
                 targets = rew_t + cfg.gamma * (1.0 - done_t) * next_q
 
-            loss = nn.functional.smooth_l1_loss(q_values, targets)
+            td_errors = q_values - targets
+
+            if cfg.prioritized_replay and w_t is not None:
+                per_sample = nn.functional.smooth_l1_loss(q_values, targets, reduction="none")
+                loss = (w_t * per_sample).mean()
+                replay.update_priorities(idxs, np.abs(td_errors.detach().cpu().numpy().squeeze()) + 1e-6)
+            else:
+                loss = nn.functional.smooth_l1_loss(q_values, targets)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(q_online.parameters(), max_norm=10.0)
@@ -224,6 +344,7 @@ def main() -> None:
                 env_id,
                 q_online,
                 device,
+                cfg.frame_stack,
                 episodes=args.eval_episodes,
             )
             rewards_log.append((step, mean_ret, success_rate, mean_steps))

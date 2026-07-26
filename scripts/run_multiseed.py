@@ -16,6 +16,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ddqn-steps", type=int, default=200_000)
     parser.add_argument("--eval-freq", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=30)
+    parser.add_argument("--frame-stack", type=int, default=1)
+    parser.add_argument("--dqn-learning-starts", type=int, default=2_000)
+    parser.add_argument("--dqn-buffer-size", type=int, default=200_000)
+    parser.add_argument("--dqn-batch-size", type=int, default=128)
+    parser.add_argument("--dqn-target-update-interval", type=int, default=2_000)
+    parser.add_argument("--dqn-exploration-fraction", type=float, default=0.5)
+    parser.add_argument("--dqn-exploration-final-eps", type=float, default=0.02)
+    parser.add_argument("--ddqn-learning-starts", type=int, default=2_000)
+    parser.add_argument("--ddqn-buffer-size", type=int, default=200_000)
+    parser.add_argument("--ddqn-batch-size", type=int, default=128)
+    parser.add_argument("--ddqn-target-update-freq", type=int, default=2_000)
+    parser.add_argument("--ddqn-epsilon-decay-fraction", type=float, default=0.5)
+    parser.add_argument("--ddqn-epsilon-end", type=float, default=0.02)
+    parser.add_argument("--ddqn-prioritized-replay", action="store_true")
     return parser.parse_args()
 
 
@@ -37,7 +51,7 @@ def parse_eval_stdout(stdout: str) -> tuple[float, float, float]:
     )
 
 
-def evaluate_model(algo: str, model_path: Path, episodes: int) -> tuple[float, float, float]:
+def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int) -> tuple[float, float, float]:
     cmd = [
         sys.executable,
         "scripts/evaluate_model.py",
@@ -47,6 +61,8 @@ def evaluate_model(algo: str, model_path: Path, episodes: int) -> tuple[float, f
         str(model_path),
         "--episodes",
         str(episodes),
+        "--frame-stack",
+        str(frame_stack),
     ]
     print("[eval]", " ".join(cmd))
     result = subprocess.run(cmd, check=True, text=True, capture_output=True)
@@ -81,6 +97,8 @@ def main() -> None:
                         str(args.eval_freq),
                         "--eval-episodes",
                         str(args.eval_episodes),
+                        "--frame-stack",
+                        str(args.frame_stack),
                         "--run-name",
                         run_name,
                     ]
@@ -99,31 +117,65 @@ def main() -> None:
                         str(args.eval_freq),
                         "--eval-episodes",
                         str(args.eval_episodes),
+                        "--frame-stack",
+                        str(args.frame_stack),
+                        "--learning-starts",
+                        str(args.dqn_learning_starts),
+                        "--buffer-size",
+                        str(args.dqn_buffer_size),
+                        "--batch-size",
+                        str(args.dqn_batch_size),
+                        "--target-update-interval",
+                        str(args.dqn_target_update_interval),
+                        "--exploration-fraction",
+                        str(args.dqn_exploration_fraction),
+                        "--exploration-final-eps",
+                        str(args.dqn_exploration_final_eps),
                         "--run-name",
                         run_name,
                     ]
                 )
                 model_path = outputs_dir / f"dqn_{run_name}.zip"
             else:
-                run_cmd(
-                    [
-                        sys.executable,
-                        "scripts/train_ddqn_torch.py",
-                        "--seed",
-                        str(seed),
-                        "--total-steps",
-                        str(args.ddqn_steps),
-                        "--eval-every",
-                        str(args.eval_freq),
-                        "--eval-episodes",
-                        str(args.eval_episodes),
-                        "--run-name",
-                        run_name,
-                    ]
-                )
+                ddqn_cmd = [
+                    sys.executable,
+                    "scripts/train_ddqn_torch.py",
+                    "--seed",
+                    str(seed),
+                    "--total-steps",
+                    str(args.ddqn_steps),
+                    "--eval-every",
+                    str(args.eval_freq),
+                    "--eval-episodes",
+                    str(args.eval_episodes),
+                    "--learning-starts",
+                    str(args.ddqn_learning_starts),
+                    "--buffer-size",
+                    str(args.ddqn_buffer_size),
+                    "--batch-size",
+                    str(args.ddqn_batch_size),
+                    "--target-update-freq",
+                    str(args.ddqn_target_update_freq),
+                    "--epsilon-decay-fraction",
+                    str(args.ddqn_epsilon_decay_fraction),
+                    "--epsilon-end",
+                    str(args.ddqn_epsilon_end),
+                    "--frame-stack",
+                    str(args.frame_stack),
+                    "--run-name",
+                    run_name,
+                ]
+                if args.ddqn_prioritized_replay:
+                    ddqn_cmd.append("--prioritized-replay")
+                run_cmd(ddqn_cmd)
                 model_path = outputs_dir / f"ddqn_{run_name}.pt"
 
-            mean_return, success_rate, mean_steps = evaluate_model(algo, model_path, args.eval_episodes)
+            mean_return, success_rate, mean_steps = evaluate_model(
+                algo,
+                model_path,
+                args.eval_episodes,
+                args.frame_stack,
+            )
             rows.append(
                 {
                     "algo": algo,

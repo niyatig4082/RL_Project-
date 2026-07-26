@@ -2,10 +2,11 @@ import argparse
 from pathlib import Path
 
 import gymnasium as gym
+import miniworld
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
 
 def make_env() -> gym.Env:
@@ -19,6 +20,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-freq", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--frame-stack", type=int, default=1)
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument("--buffer-size", type=int, default=200_000)
+    parser.add_argument("--learning-starts", type=int, default=2_000)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--train-freq", type=int, default=4)
+    parser.add_argument("--gradient-steps", type=int, default=1)
+    parser.add_argument("--target-update-interval", type=int, default=2_000)
+    parser.add_argument("--exploration-fraction", type=float, default=0.5)
+    parser.add_argument("--exploration-initial-eps", type=float, default=1.0)
+    parser.add_argument("--exploration-final-eps", type=float, default=0.02)
     return parser.parse_args()
 
 
@@ -37,21 +50,34 @@ def main() -> None:
     eval_env = DummyVecEnv([lambda: Monitor(make_env())])
     eval_env = VecTransposeImage(eval_env)
 
+    if args.frame_stack > 1:
+        env = VecFrameStack(env, n_stack=args.frame_stack)
+        eval_env = VecFrameStack(eval_env, n_stack=args.frame_stack)
+
+    effective_learning_starts = min(args.learning_starts, max(100, args.total_timesteps // 4))
+
+    if effective_learning_starts != args.learning_starts:
+        print(
+            "[info] Adjusted learning_starts "
+            f"from {args.learning_starts} to {effective_learning_starts} "
+            "to ensure updates occur within the training budget."
+        )
+
     model = DQN(
         policy="CnnPolicy",
         env=env,
-        learning_rate=1e-4,
-        buffer_size=100_000,
-        learning_starts=5_000,
-        batch_size=64,
+        learning_rate=args.learning_rate,
+        buffer_size=args.buffer_size,
+        learning_starts=effective_learning_starts,
+        batch_size=args.batch_size,
         tau=1.0,
-        gamma=0.99,
-        train_freq=4,
-        gradient_steps=1,
-        target_update_interval=10_000,
-        exploration_fraction=0.2,
-        exploration_initial_eps=1.0,
-        exploration_final_eps=0.05,
+        gamma=args.gamma,
+        train_freq=args.train_freq,
+        gradient_steps=args.gradient_steps,
+        target_update_interval=args.target_update_interval,
+        exploration_fraction=args.exploration_fraction,
+        exploration_initial_eps=args.exploration_initial_eps,
+        exploration_final_eps=args.exploration_final_eps,
         verbose=1,
         tensorboard_log="logs/dqn",
         seed=args.seed,

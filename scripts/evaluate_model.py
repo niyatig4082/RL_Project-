@@ -11,6 +11,8 @@ import imageio.v2 as imageio
 from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
+from reward_shaping import GoalDistanceRewardWrapper
+
 try:
     from train_ddqn_torch import QNet, preprocess_obs
 except ModuleNotFoundError:
@@ -18,7 +20,7 @@ except ModuleNotFoundError:
 
 
 def make_sb3_vec_env(frame_stack: int) -> DummyVecEnv:
-    env = DummyVecEnv([lambda: gym.make("MiniWorld-FourRooms-v0")])
+    env = DummyVecEnv([lambda: GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))])
     env = VecTransposeImage(env)
     if frame_stack > 1:
         env = VecFrameStack(env, n_stack=frame_stack)
@@ -64,7 +66,7 @@ def evaluate_sb3(model, episodes: int, frame_stack: int) -> tuple[float, float, 
 
         returns.append(ep_ret)
         steps.append(ep_steps)
-        if ep_ret > 0:
+        if done and ep_ret > 0:
             successes += 1
 
     env.close()
@@ -83,7 +85,7 @@ def infer_ddqn_in_channels(state_dict: dict[str, torch.Tensor]) -> int:
 
 
 def record_sb3_video(model, frame_stack: int, video_dir: Path, video_prefix: str, max_steps: int) -> None:
-    env = gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array")
+    env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array"))
 
     obs, _ = env.reset()
     frame_queue: list[np.ndarray] = []
@@ -109,7 +111,7 @@ def record_sb3_video(model, frame_stack: int, video_dir: Path, video_prefix: str
 
 
 def evaluate_ddqn(path: Path, episodes: int, frame_stack: int) -> tuple[float, float, float]:
-    env = gym.make("MiniWorld-FourRooms-v0")
+    env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))
     device = get_torch_device()
 
     state_dict = torch.load(path, map_location=device)
@@ -153,7 +155,7 @@ def evaluate_ddqn(path: Path, episodes: int, frame_stack: int) -> tuple[float, f
 
 
 def record_ddqn_video(path: Path, video_dir: Path, video_prefix: str, max_steps: int, frame_stack: int) -> None:
-    env = gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array")
+    env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array"))
     device = get_torch_device()
     state_dict = torch.load(path, map_location=device)
     in_channels = infer_ddqn_in_channels(state_dict)

@@ -7,7 +7,7 @@ import numpy as np
 class GoalDistanceRewardWrapper(gym.Wrapper):
     """Add dense progress reward based on distance to the goal."""
 
-    def __init__(self, env: gym.Env, progress_scale: float = 0.25, step_penalty: float = 0.001, success_bonus: float = 5.0):
+    def __init__(self, env: gym.Env, progress_scale: float = 0.5, step_penalty: float = 0.001, success_bonus: float = 10.0):
         super().__init__(env)
         self._prev_distance: float | None = None
         self.progress_scale = progress_scale
@@ -51,4 +51,7 @@ class GoalDistanceRewardWrapper(gym.Wrapper):
             if distance < 1.0:
                 shaped_reward += self.success_bonus
         self._prev_distance = distance
+        info = dict(info or {})
+        info["success"] = bool(terminated and distance < 1.0)
+        info["distance_to_goal"] = distance
         return obs, shaped_reward, terminated, truncated, info

@@ -31,18 +31,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-freq", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--frame-stack", type=int, default=1)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--buffer-size", type=int, default=100_000)
-    parser.add_argument("--learning-starts", type=int, default=5_000)
+    parser.add_argument("--frame-stack", type=int, default=3)
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument("--buffer-size", type=int, default=200_000)
+    parser.add_argument("--learning-starts", type=int, default=2_000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--train-freq", type=int, default=1)
     parser.add_argument("--gradient-steps", type=int, default=1)
-    parser.add_argument("--target-update-interval", type=int, default=1_000)
-    parser.add_argument("--exploration-fraction", type=float, default=0.25)
-    parser.add_argument("--exploration-initial-eps", type=float, default=0.9)
+    parser.add_argument("--target-update-interval", type=int, default=2_000)
+    parser.add_argument("--exploration-fraction", type=float, default=0.6)
+    parser.add_argument("--exploration-initial-eps", type=float, default=1.0)
     parser.add_argument("--exploration-final-eps", type=float, default=0.05)
+    parser.add_argument("--tau", type=float, default=1.0)
+    parser.add_argument("--net-arch", nargs="+", type=int, default=[64, 64])
+    parser.add_argument("--use-prioritized-replay", action="store_true")
+    parser.add_argument("--prioritized-alpha", type=float, default=0.6)
+    parser.add_argument("--prioritized-beta0", type=float, default=0.4)
     return parser.parse_args()
 
 
@@ -104,6 +109,11 @@ def main() -> None:
             "to ensure updates occur within the training budget."
         )
 
+    policy_kwargs = dict(net_arch=list(args.net_arch))
+
+    if args.use_prioritized_replay:
+        print("[info] Using prioritized replay buffer")
+
     model = DQN(
         policy="CnnPolicy",
         env=env,
@@ -111,7 +121,7 @@ def main() -> None:
         buffer_size=args.buffer_size,
         learning_starts=effective_learning_starts,
         batch_size=args.batch_size,
-        tau=1.0,
+        tau=args.tau,
         gamma=args.gamma,
         train_freq=args.train_freq,
         gradient_steps=args.gradient_steps,
@@ -119,6 +129,7 @@ def main() -> None:
         exploration_fraction=args.exploration_fraction,
         exploration_initial_eps=args.exploration_initial_eps,
         exploration_final_eps=args.exploration_final_eps,
+        policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log="logs/dqn",
         seed=args.seed,
@@ -136,7 +147,9 @@ def main() -> None:
     )
 
     model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
-    model.save(output_dir / f"dqn_{run_name}")
+    artifact_path = output_dir / f"dqn_{run_name}.zip"
+    model.save(artifact_path)
+    print(f"[info] saved model to {artifact_path}")
 
     env.close()
     eval_env.close()

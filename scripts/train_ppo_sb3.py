@@ -9,9 +9,11 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
+from reward_shaping import GoalDistanceRewardWrapper
+
 
 def make_env() -> gym.Env:
-    return gym.make("MiniWorld-FourRooms-v0")
+    return GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))
 
 
 def select_device() -> str:
@@ -41,8 +43,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if args.total_timesteps <= 0:
+        raise ValueError("--total-timesteps must be > 0")
+    if args.eval_freq <= 0:
+        raise ValueError("--eval-freq must be > 0")
+    if args.eval_episodes <= 0:
+        raise ValueError("--eval-episodes must be > 0")
+    if args.frame_stack <= 0:
+        raise ValueError("--frame-stack must be > 0")
+    if args.learning_rate <= 0:
+        raise ValueError("--learning-rate must be > 0")
+    if args.n_steps <= 0:
+        raise ValueError("--n-steps must be > 0")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be > 0")
+    if args.n_epochs <= 0:
+        raise ValueError("--n-epochs must be > 0")
+
+
 def main() -> None:
     args = parse_args()
+    validate_args(args)
     device = select_device()
     print(f"[info] PPO using device: {device}")
 
@@ -91,7 +113,7 @@ def main() -> None:
         render=False,
     )
 
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=True, callback=eval_callback)
+    model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
     model.save(output_dir / f"ppo_{run_name}")
 
     env.close()

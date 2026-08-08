@@ -9,9 +9,11 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
+from reward_shaping import GoalDistanceRewardWrapper
+
 
 def make_env() -> gym.Env:
-    return gym.make("MiniWorld-FourRooms-v0")
+    return GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))
 
 
 def select_device() -> str:
@@ -30,22 +32,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--frame-stack", type=int, default=1)
-    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
-    parser.add_argument("--buffer-size", type=int, default=200_000)
-    parser.add_argument("--learning-starts", type=int, default=2_000)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--buffer-size", type=int, default=100_000)
+    parser.add_argument("--learning-starts", type=int, default=5_000)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--train-freq", type=int, default=4)
+    parser.add_argument("--train-freq", type=int, default=1)
     parser.add_argument("--gradient-steps", type=int, default=1)
-    parser.add_argument("--target-update-interval", type=int, default=2_000)
-    parser.add_argument("--exploration-fraction", type=float, default=0.5)
-    parser.add_argument("--exploration-initial-eps", type=float, default=1.0)
-    parser.add_argument("--exploration-final-eps", type=float, default=0.02)
+    parser.add_argument("--target-update-interval", type=int, default=1_000)
+    parser.add_argument("--exploration-fraction", type=float, default=0.25)
+    parser.add_argument("--exploration-initial-eps", type=float, default=0.9)
+    parser.add_argument("--exploration-final-eps", type=float, default=0.05)
     return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.total_timesteps <= 0:
+        raise ValueError("--total-timesteps must be > 0")
+    if args.eval_freq <= 0:
+        raise ValueError("--eval-freq must be > 0")
+    if args.eval_episodes <= 0:
+        raise ValueError("--eval-episodes must be > 0")
+    if args.frame_stack <= 0:
+        raise ValueError("--frame-stack must be > 0")
+    if args.learning_rate <= 0:
+        raise ValueError("--learning-rate must be > 0")
+    if args.buffer_size <= 0:
+        raise ValueError("--buffer-size must be > 0")
+    if args.learning_starts < 0:
+        raise ValueError("--learning-starts must be >= 0")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be > 0")
+    if args.train_freq <= 0:
+        raise ValueError("--train-freq must be > 0")
+    if args.gradient_steps <= 0:
+        raise ValueError("--gradient-steps must be > 0")
+    if args.target_update_interval <= 0:
+        raise ValueError("--target-update-interval must be > 0")
 
 
 def main() -> None:
     args = parse_args()
+    validate_args(args)
     device = select_device()
     print(f"[info] DQN using device: {device}")
 
@@ -107,7 +135,7 @@ def main() -> None:
         render=False,
     )
 
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=True, callback=eval_callback)
+    model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
     model.save(output_dir / f"dqn_{run_name}")
 
     env.close()

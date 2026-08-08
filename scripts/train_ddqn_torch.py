@@ -215,6 +215,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.total_steps <= 0:
+        raise ValueError("--total-steps must be > 0")
+    if args.eval_every <= 0:
+        raise ValueError("--eval-every must be > 0")
+    if args.eval_episodes <= 0:
+        raise ValueError("--eval-episodes must be > 0")
+    if args.frame_stack <= 0:
+        raise ValueError("--frame-stack must be > 0")
+
     cfg = Config(
         seed=args.seed,
         total_steps=args.total_steps,

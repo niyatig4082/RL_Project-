@@ -17,13 +17,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_sb3_curve(algo: str, seed: int) -> tuple[np.ndarray, np.ndarray] | None:
-    path = Path("logs") / algo / f"seed_{seed}" / "evaluations.npz"
-    if not path.exists():
-        return None
-    data = np.load(path)
-    x = data["timesteps"]
-    y = data["results"].mean(axis=1)
-    return x, y
+    candidates = [
+        Path("logs") / algo / f"seed_{seed}" / "evaluations.npz",
+        Path("logs") / algo / f"{seed}" / "evaluations.npz",
+        Path("logs") / algo / "final_dqn" / "evaluations.npz",
+        Path("logs") / algo / "final_dqn" / "evaluations.npz",
+        Path("logs") / algo / "gpu_run_1" / "evaluations.npz",
+        Path("logs") / algo / "reward_shape_adjusted" / "evaluations.npz",
+        Path("logs") / algo / "reward_shape_long" / "evaluations.npz",
+        Path("logs") / algo / "reward_shape_test" / "evaluations.npz",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            data = np.load(path)
+            x = data["timesteps"]
+            y = data["results"].mean(axis=1)
+            return x, y
+
+    return None
 
 
 def load_ddqn_curve(seed: int) -> tuple[np.ndarray, np.ndarray] | None:

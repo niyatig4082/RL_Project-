@@ -33,6 +33,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if not args.seeds:
+        raise ValueError("--seeds must include at least one seed")
+    if not args.algos:
+        raise ValueError("--algos must include at least one algorithm")
+    if args.ppo_steps <= 0:
+        raise ValueError("--ppo-steps must be > 0")
+    if args.dqn_steps <= 0:
+        raise ValueError("--dqn-steps must be > 0")
+    if args.ddqn_steps <= 0:
+        raise ValueError("--ddqn-steps must be > 0")
+    if args.eval_freq <= 0:
+        raise ValueError("--eval-freq must be > 0")
+    if args.eval_episodes <= 0:
+        raise ValueError("--eval-episodes must be > 0")
+    if args.frame_stack <= 0:
+        raise ValueError("--frame-stack must be > 0")
+
+
 def run_cmd(cmd: list[str]) -> None:
     print("[run]", " ".join(cmd))
     subprocess.run(cmd, check=True)
@@ -81,6 +100,7 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int)
 
 def main() -> None:
     args = parse_args()
+    validate_args(args)
 
     outputs_dir = Path("outputs")
     outputs_dir.mkdir(parents=True, exist_ok=True)

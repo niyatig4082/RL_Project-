@@ -11,7 +11,10 @@ import imageio.v2 as imageio
 from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
-from train_ddqn_torch import QNet, preprocess_obs
+try:
+    from train_ddqn_torch import QNet, preprocess_obs
+except ModuleNotFoundError:
+    from scripts.train_ddqn_torch import QNet, preprocess_obs
 
 
 def make_sb3_vec_env(frame_stack: int) -> DummyVecEnv:

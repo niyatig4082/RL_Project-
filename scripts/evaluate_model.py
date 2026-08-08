@@ -84,30 +84,42 @@ def infer_ddqn_in_channels(state_dict: dict[str, torch.Tensor]) -> int:
     return int(state_dict["features.0.weight"].shape[1])
 
 
-def record_sb3_video(model, frame_stack: int, video_dir: Path, video_prefix: str, max_steps: int) -> None:
-    env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array"))
+def record_sb3_video(
+    model,
+    frame_stack: int,
+    video_dir: Path,
+    video_prefix: str,
+    max_steps: int,
+    episodes: int,
+    fps: int,
+) -> None:
+    frames: list[np.ndarray] = []
 
-    obs, _ = env.reset()
-    frame_queue: list[np.ndarray] = []
-    base = preprocess_obs(obs)
-    frames: list[np.ndarray] = [env.render()]
-    for _ in range(max(1, frame_stack)):
-        frame_queue.append(base)
+    for episode_idx in range(episodes):
+        env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array"))
+        obs, _ = env.reset(seed=episode_idx)
+        frame_queue: list[np.ndarray] = []
+        base = preprocess_obs(obs)
+        for _ in range(max(1, frame_stack)):
+            frame_queue.append(base)
 
-    done = False
-    truncated = False
-    steps = 0
-    while not (done or truncated) and steps < max_steps:
-        stacked = np.concatenate(frame_queue, axis=0)
-        action, _ = model.predict(stacked, deterministic=True)
-        next_obs, _, done, truncated, _ = env.step(int(action))
-        frames.append(env.render())
-        frame_queue.pop(0)
-        frame_queue.append(preprocess_obs(next_obs))
-        steps += 1
+        done = False
+        truncated = False
+        steps = 0
+        while not (done or truncated) and steps < max_steps:
+            stacked = np.concatenate(frame_queue, axis=0)
+            action, _ = model.predict(stacked, deterministic=True)
+            next_obs, _, done, truncated, _ = env.step(int(action))
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
+            frame_queue.pop(0)
+            frame_queue.append(preprocess_obs(next_obs))
+            steps += 1
 
-    env.close()
-    write_video(frames, video_dir / f"{video_prefix}.mp4")
+        env.close()
+
+    write_video(frames, video_dir / f"{video_prefix}.mp4", fps=fps)
 
 
 def evaluate_ddqn(path: Path, episodes: int, frame_stack: int) -> tuple[float, float, float]:
@@ -154,37 +166,50 @@ def evaluate_ddqn(path: Path, episodes: int, frame_stack: int) -> tuple[float, f
     return float(np.mean(returns)), successes / episodes, float(np.mean(steps))
 
 
-def record_ddqn_video(path: Path, video_dir: Path, video_prefix: str, max_steps: int, frame_stack: int) -> None:
-    env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array"))
+def record_ddqn_video(
+    path: Path,
+    video_dir: Path,
+    video_prefix: str,
+    max_steps: int,
+    frame_stack: int,
+    episodes: int,
+    fps: int,
+) -> None:
     device = get_torch_device()
     state_dict = torch.load(path, map_location=device)
     in_channels = infer_ddqn_in_channels(state_dict)
-    model = QNet(env.action_space.n, in_channels=in_channels).to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
+    frames: list[np.ndarray] = []
 
-    obs, _ = env.reset()
-    first = preprocess_obs(obs)
-    stack_n = max(1, frame_stack)
-    frame_queue = [first for _ in range(stack_n)]
-    obs = np.concatenate(frame_queue, axis=0)
-    frames: list[np.ndarray] = [env.render()]
-    done = False
-    truncated = False
-    steps = 0
+    for episode_idx in range(episodes):
+        env = GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array"))
+        model = QNet(env.action_space.n, in_channels=in_channels).to(device)
+        model.load_state_dict(state_dict)
+        model.eval()
 
-    while not (done or truncated) and steps < max_steps:
-        with torch.no_grad():
-            action = int(torch.argmax(model(torch.from_numpy(obs).unsqueeze(0).to(device)), dim=1).item())
-        next_obs, _, done, truncated, _ = env.step(action)
-        frames.append(env.render())
-        frame_queue.pop(0)
-        frame_queue.append(preprocess_obs(next_obs))
+        obs, _ = env.reset(seed=episode_idx)
+        first = preprocess_obs(obs)
+        stack_n = max(1, frame_stack)
+        frame_queue = [first for _ in range(stack_n)]
         obs = np.concatenate(frame_queue, axis=0)
-        steps += 1
+        done = False
+        truncated = False
+        steps = 0
 
-    env.close()
-    write_video(frames, video_dir / f"{video_prefix}.mp4")
+        while not (done or truncated) and steps < max_steps:
+            with torch.no_grad():
+                action = int(torch.argmax(model(torch.from_numpy(obs).unsqueeze(0).to(device)), dim=1).item())
+            next_obs, _, done, truncated, _ = env.step(action)
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
+            frame_queue.pop(0)
+            frame_queue.append(preprocess_obs(next_obs))
+            obs = np.concatenate(frame_queue, axis=0)
+            steps += 1
+
+        env.close()
+
+    write_video(frames, video_dir / f"{video_prefix}.mp4", fps=fps)
 
 
 def main() -> None:
@@ -197,6 +222,8 @@ def main() -> None:
     parser.add_argument("--video-dir", type=str, default="outputs/videos")
     parser.add_argument("--video-prefix", type=str, default=None)
     parser.add_argument("--video-max-steps", type=int, default=500)
+    parser.add_argument("--video-episodes", type=int, default=3)
+    parser.add_argument("--video-fps", type=int, default=20)
     args = parser.parse_args()
 
     if args.episodes <= 0:
@@ -205,6 +232,10 @@ def main() -> None:
         raise ValueError("--frame-stack must be > 0")
     if args.video_max_steps <= 0:
         raise ValueError("--video-max-steps must be > 0")
+    if args.video_episodes <= 0:
+        raise ValueError("--video-episodes must be > 0")
+    if args.video_fps <= 0:
+        raise ValueError("--video-fps must be > 0")
 
     model_path = Path(args.model_path)
     if not model_path.exists():
@@ -220,7 +251,15 @@ def main() -> None:
         model = PPO.load(model_path, env=eval_env, device=sb3_device)
         mean_return, success_rate, mean_steps = evaluate_sb3(model, args.episodes, args.frame_stack)
         if args.record_video:
-            record_sb3_video(model, args.frame_stack, video_dir, video_prefix, args.video_max_steps)
+            record_sb3_video(
+                model,
+                args.frame_stack,
+                video_dir,
+                video_prefix,
+                args.video_max_steps,
+                args.video_episodes,
+                args.video_fps,
+            )
         eval_env.close()
     elif args.algo == "dqn":
         sb3_device = get_sb3_device()
@@ -229,13 +268,29 @@ def main() -> None:
         model = DQN.load(model_path, env=eval_env, device=sb3_device)
         mean_return, success_rate, mean_steps = evaluate_sb3(model, args.episodes, args.frame_stack)
         if args.record_video:
-            record_sb3_video(model, args.frame_stack, video_dir, video_prefix, args.video_max_steps)
+            record_sb3_video(
+                model,
+                args.frame_stack,
+                video_dir,
+                video_prefix,
+                args.video_max_steps,
+                args.video_episodes,
+                args.video_fps,
+            )
         eval_env.close()
     else:
         print(f"[info] DDQN eval using device: {get_torch_device()}")
         mean_return, success_rate, mean_steps = evaluate_ddqn(model_path, args.episodes, args.frame_stack)
         if args.record_video:
-            record_ddqn_video(model_path, video_dir, video_prefix, args.video_max_steps, args.frame_stack)
+            record_ddqn_video(
+                model_path,
+                video_dir,
+                video_prefix,
+                args.video_max_steps,
+                args.frame_stack,
+                args.video_episodes,
+                args.video_fps,
+            )
 
     print(f"algo: {args.algo}")
     print(f"episodes: {args.episodes}")

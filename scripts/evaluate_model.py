@@ -22,6 +22,22 @@ def make_sb3_vec_env(frame_stack: int) -> DummyVecEnv:
     return env
 
 
+def get_torch_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def get_sb3_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def evaluate_sb3(model, episodes: int, frame_stack: int) -> tuple[float, float, float]:
     env = make_sb3_vec_env(frame_stack)
     returns = []
@@ -91,7 +107,7 @@ def record_sb3_video(model, frame_stack: int, video_dir: Path, video_prefix: str
 
 def evaluate_ddqn(path: Path, episodes: int, frame_stack: int) -> tuple[float, float, float]:
     env = gym.make("MiniWorld-FourRooms-v0")
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = get_torch_device()
 
     state_dict = torch.load(path, map_location=device)
     in_channels = infer_ddqn_in_channels(state_dict)
@@ -135,7 +151,7 @@ def evaluate_ddqn(path: Path, episodes: int, frame_stack: int) -> tuple[float, f
 
 def record_ddqn_video(path: Path, video_dir: Path, video_prefix: str, max_steps: int, frame_stack: int) -> None:
     env = gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array")
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = get_torch_device()
     state_dict = torch.load(path, map_location=device)
     in_channels = infer_ddqn_in_channels(state_dict)
     model = QNet(env.action_space.n, in_channels=in_channels).to(device)
@@ -178,25 +194,40 @@ def main() -> None:
     parser.add_argument("--video-max-steps", type=int, default=500)
     args = parser.parse_args()
 
+    if args.episodes <= 0:
+        raise ValueError("--episodes must be > 0")
+    if args.frame_stack <= 0:
+        raise ValueError("--frame-stack must be > 0")
+    if args.video_max_steps <= 0:
+        raise ValueError("--video-max-steps must be > 0")
+
     model_path = Path(args.model_path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
     video_dir = Path(args.video_dir)
     video_prefix = args.video_prefix or f"{args.algo}_{model_path.stem}"
 
     if args.algo == "ppo":
+        sb3_device = get_sb3_device()
+        print(f"[info] PPO eval using device: {sb3_device}")
         eval_env = make_sb3_vec_env(args.frame_stack)
-        model = PPO.load(model_path, env=eval_env)
+        model = PPO.load(model_path, env=eval_env, device=sb3_device)
         mean_return, success_rate, mean_steps = evaluate_sb3(model, args.episodes, args.frame_stack)
         if args.record_video:
             record_sb3_video(model, args.frame_stack, video_dir, video_prefix, args.video_max_steps)
         eval_env.close()
     elif args.algo == "dqn":
+        sb3_device = get_sb3_device()
+        print(f"[info] DQN eval using device: {sb3_device}")
         eval_env = make_sb3_vec_env(args.frame_stack)
-        model = DQN.load(model_path, env=eval_env)
+        model = DQN.load(model_path, env=eval_env, device=sb3_device)
         mean_return, success_rate, mean_steps = evaluate_sb3(model, args.episodes, args.frame_stack)
         if args.record_video:
             record_sb3_video(model, args.frame_stack, video_dir, video_prefix, args.video_max_steps)
         eval_env.close()
     else:
+        print(f"[info] DDQN eval using device: {get_torch_device()}")
         mean_return, success_rate, mean_steps = evaluate_ddqn(model_path, args.episodes, args.frame_stack)
         if args.record_video:
             record_ddqn_video(model_path, video_dir, video_prefix, args.video_max_steps, args.frame_stack)
@@ -207,8 +238,8 @@ def main() -> None:
     print(f"success_rate: {success_rate:.4f}")
     print(f"mean_steps: {mean_steps:.2f}")
     if args.record_video:
-        print(f"video_dir: {video_dir}")
-        print(f"video_prefix: {video_prefix}")
+        video_path = video_dir / f"{video_prefix}.mp4"
+        print(f"video_path: {video_path}")
 
 
 if __name__ == "__main__":

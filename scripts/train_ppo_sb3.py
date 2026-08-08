@@ -3,6 +3,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import miniworld
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
@@ -11,6 +12,14 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTran
 
 def make_env() -> gym.Env:
     return gym.make("MiniWorld-FourRooms-v0")
+
+
+def select_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +43,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    device = select_device()
+    print(f"[info] PPO using device: {device}")
 
     run_name = args.run_name or f"seed_{args.seed}"
     output_dir = Path("outputs")
@@ -46,6 +57,8 @@ def main() -> None:
     env = VecTransposeImage(env)
     eval_env = DummyVecEnv([lambda: Monitor(make_env())])
     eval_env = VecTransposeImage(eval_env)
+    env.seed(args.seed)
+    eval_env.seed(args.seed + 1)
 
     if args.frame_stack > 1:
         env = VecFrameStack(env, n_stack=args.frame_stack)
@@ -65,6 +78,7 @@ def main() -> None:
         verbose=1,
         tensorboard_log="logs/ppo",
         seed=args.seed,
+        device=device,
     )
 
     eval_callback = EvalCallback(

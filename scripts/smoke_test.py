@@ -9,6 +9,8 @@ def main() -> None:
     print(f"miniworld: {miniworld.__version__}")
     print(f"stable_baselines3: {stable_baselines3.__version__}")
     print(f"torch: {torch.__version__}")
+    print(f"cuda_available: {torch.cuda.is_available()}")
+    print(f"cuda_device_count: {torch.cuda.device_count()}")
 
     env = gym.make("MiniWorld-FourRooms-v0")
     obs, _ = env.reset()

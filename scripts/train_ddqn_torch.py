@@ -139,6 +139,14 @@ def epsilon_by_step(step: int, cfg: Config) -> float:
     return cfg.epsilon_start + ratio * (cfg.epsilon_end - cfg.epsilon_start)
 
 
+def get_torch_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def evaluate_policy(
     env_id: str,
     q_net: QNet,
@@ -233,7 +241,8 @@ def main() -> None:
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = get_torch_device()
+    print(f"[info] DDQN using device: {device}")
 
     env = gym.make(env_id)
     obs, _ = env.reset(seed=cfg.seed)

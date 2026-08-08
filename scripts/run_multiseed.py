@@ -44,6 +44,13 @@ def parse_eval_stdout(stdout: str) -> tuple[float, float, float]:
         if ":" in line:
             key, val = line.split(":", 1)
             values[key.strip()] = val.strip()
+    required = ["mean_return", "success_rate", "mean_steps"]
+    missing = [key for key in required if key not in values]
+    if missing:
+        raise ValueError(
+            "Could not parse evaluation output. "
+            f"Missing fields: {missing}.\nRaw output:\n{stdout}"
+        )
     return (
         float(values["mean_return"]),
         float(values["success_rate"]),
@@ -66,6 +73,8 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int)
     ]
     print("[eval]", " ".join(cmd))
     result = subprocess.run(cmd, check=True, text=True, capture_output=True)
+    if result.stderr:
+        print(result.stderr)
     print(result.stdout)
     return parse_eval_stdout(result.stdout)
 

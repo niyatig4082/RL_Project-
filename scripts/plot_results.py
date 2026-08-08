@@ -49,6 +49,13 @@ def aggregate_curves(curves: list[tuple[np.ndarray, np.ndarray]]) -> tuple[np.nd
     return common_x, y_stack.mean(axis=0), y_stack.std(axis=0)
 
 
+def validate_summary_columns(df: pd.DataFrame) -> None:
+    required = {"algo", "success_rate", "mean_return"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"Summary CSV missing required columns: {missing}")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -56,6 +63,7 @@ def main() -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(10, 6))
+    plotted_any = False
 
     for algo in args.algos:
         curves: list[tuple[np.ndarray, np.ndarray]] = []
@@ -77,20 +85,28 @@ def main() -> None:
         label = f"{algo.upper()} (n={len(curves)})"
         plt.plot(x, mean, label=label)
         plt.fill_between(x, mean - std, mean + std, alpha=0.2)
+        plotted_any = True
 
-    plt.xlabel("Training Timesteps")
-    plt.ylabel("Mean Evaluation Return")
-    plt.title("FourRooms: Mean Return vs Timesteps")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
     reward_plot_path = plots_dir / "reward_vs_timesteps.png"
-    plt.savefig(reward_plot_path, dpi=180)
+    if plotted_any:
+        plt.xlabel("Training Timesteps")
+        plt.ylabel("Mean Evaluation Return")
+        plt.title("FourRooms: Mean Return vs Timesteps")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(reward_plot_path, dpi=180)
+        print(f"Saved plot: {reward_plot_path}")
+    else:
+        print("Skipping reward_vs_timesteps plot: no training curves found")
     plt.close()
 
     summary_path = Path(args.summary_csv)
     if summary_path.exists():
         df = pd.read_csv(summary_path)
+        validate_summary_columns(df)
+        if df.empty:
+            raise ValueError("Summary CSV is empty")
         agg = (
             df.groupby("algo")
             .agg(
@@ -125,7 +141,6 @@ def main() -> None:
         plt.savefig(return_plot_path, dpi=180)
         plt.close()
 
-    print(f"Saved plot: {reward_plot_path}")
     if summary_path.exists():
         print(f"Saved plot: {plots_dir / 'final_success_rate.png'}")
         print(f"Saved plot: {plots_dir / 'final_mean_return.png'}")

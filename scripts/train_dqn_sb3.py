@@ -10,6 +10,8 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
+from reward_wrappers import StrictGoalRewardWrapper
+
 
 def ensure_miniworld_textures() -> None:
     texture_dir = Path(miniworld.__file__).resolve().parent / "textures"
@@ -31,7 +33,8 @@ def ensure_miniworld_textures() -> None:
 
 def make_env() -> gym.Env:
     ensure_miniworld_textures()
-    return gym.make("MiniWorld-FourRooms-v0", max_episode_steps=250)
+    env = gym.make("MiniWorld-FourRooms-v0", max_episode_steps=250)
+    return StrictGoalRewardWrapper(env, max_episode_steps=250)
 
 
 def select_device(requested: str | None = None) -> str:

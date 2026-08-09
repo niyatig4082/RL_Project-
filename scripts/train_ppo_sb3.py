@@ -10,6 +10,8 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
+from reward_wrappers import StrictGoalRewardWrapper
+
 
 def ensure_miniworld_textures() -> None:
     texture_dir = Path(miniworld.__file__).resolve().parent / "textures"
@@ -31,7 +33,8 @@ def ensure_miniworld_textures() -> None:
 
 def make_env() -> gym.Env:
     ensure_miniworld_textures()
-    return gym.make("MiniWorld-FourRooms-v0", max_episode_steps=250)
+    env = gym.make("MiniWorld-FourRooms-v0", max_episode_steps=250)
+    return StrictGoalRewardWrapper(env, max_episode_steps=250)
 
 
 def select_device(requested: str | None = None) -> str:
@@ -66,7 +69,7 @@ def select_device(requested: str | None = None) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO on MiniWorld FourRooms")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--total-timesteps", type=int, default=250_000)
+    parser.add_argument("--total-timesteps", type=int, default=500_000)
     parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
@@ -75,13 +78,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--allow-training", action="store_true", help="Explicitly allow PPO training to start")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
-    parser.add_argument("--n-steps", type=int, default=2048)
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--n-epochs", type=int, default=8)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-range", type=float, default=0.15)
-    parser.add_argument("--ent-coef", type=float, default=0.001)
+    parser.add_argument("--n-steps", type=int, default=2560)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--n-epochs", type=int, default=10)
+    parser.add_argument("--gamma", type=float, default=0.995)
+    parser.add_argument("--gae-lambda", type=float, default=0.97)
+    parser.add_argument("--clip-range", type=float, default=0.2)
+    parser.add_argument("--ent-coef", type=float, default=0.0005)
     return parser.parse_args()
 
 

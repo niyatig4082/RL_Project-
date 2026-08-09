@@ -11,8 +11,8 @@ from evaluate_model import evaluate_model
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--ppo-steps", type=int, default=100_000)
-    parser.add_argument("--dqn-steps", type=int, default=100_000)
+    parser.add_argument("--ppo-steps", type=int, default=250_000)
+    parser.add_argument("--dqn-steps", type=int, default=250_000)
     parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument("--output-dir", type=str, default="outputs")

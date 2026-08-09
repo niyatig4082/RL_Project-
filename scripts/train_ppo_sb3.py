@@ -4,14 +4,34 @@ from pathlib import Path
 import gymnasium as gym
 import miniworld
 import torch
+from PIL import Image
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
+
+
+def ensure_miniworld_textures() -> None:
+    texture_dir = Path(miniworld.__file__).resolve().parent / "textures"
+    texture_dir.mkdir(parents=True, exist_ok=True)
+    required = {
+        "concrete": (120, 120, 120),
+        "concrete_tiles": (140, 140, 140),
+        "brick_wall": (170, 90, 60),
+        "floor_tiles_bw": (100, 100, 100),
+        "asphalt": (60, 60, 60),
+    }
+    for name, color in required.items():
+        target = texture_dir / f"{name}_1.png"
+        if target.exists():
+            continue
+        img = Image.new("RGB", (64, 64), color)
+        img.save(target)
 
 
 def make_env() -> gym.Env:
-    return gym.make("MiniWorld-FourRooms-v0")
+    ensure_miniworld_textures()
+    return gym.make("MiniWorld-FourRooms-v0", max_episode_steps=250)
 
 
 def select_device(requested: str | None = None) -> str:
@@ -46,21 +66,22 @@ def select_device(requested: str | None = None) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO on MiniWorld FourRooms")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--total-timesteps", type=int, default=200_000)
-    parser.add_argument("--eval-freq", type=int, default=20_000)
+    parser.add_argument("--total-timesteps", type=int, default=250_000)
+    parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--n-steps", type=int, default=1024)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--n-epochs", type=int, default=10)
+    parser.add_argument("--allow-training", action="store_true", help="Explicitly allow PPO training to start")
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument("--n-steps", type=int, default=2048)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--n-epochs", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-range", type=float, default=0.2)
-    parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--clip-range", type=float, default=0.15)
+    parser.add_argument("--ent-coef", type=float, default=0.001)
     return parser.parse_args()
 
 
@@ -84,6 +105,8 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     validate_args(args)
+    if not args.allow_training:
+        raise PermissionError("Training is disabled by default. Re-run with --allow-training to start PPO training.")
     device = select_device(args.device)
     print(f"[info] PPO using device: {device}")
 
@@ -96,8 +119,10 @@ def main() -> None:
 
     env = DummyVecEnv([make_env])
     env = VecTransposeImage(env)
+    env = VecFrameStack(env, n_stack=4)
     eval_env = DummyVecEnv([lambda: Monitor(make_env())])
     eval_env = VecTransposeImage(eval_env)
+    eval_env = VecFrameStack(eval_env, n_stack=4)
     env.seed(args.seed)
     eval_env.seed(args.seed + 1)
 

@@ -1,26 +1,20 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import subprocess
 import sys
 from pathlib import Path
-
-import gymnasium as gym
-import imageio.v2 as imageio
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 import torch
+from evaluate_model import evaluate_model
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--ppo-steps", type=int, default=200_000)
-    parser.add_argument("--dqn-steps", type=int, default=200_000)
-    parser.add_argument("--eval-freq", type=int, default=20_000)
-    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--ppo-steps", type=int, default=100_000)
+    parser.add_argument("--dqn-steps", type=int, default=100_000)
+    parser.add_argument("--eval-freq", type=int, default=25_000)
+    parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
@@ -70,17 +64,40 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--eval-episodes must be > 0")
 
 
-def run_cmd(cmd: list[str]) -> None:
+def require_training_permission(allowed: bool) -> None:
+    if not allowed:
+        raise PermissionError("Training is disabled by default. Re-run with --allow-training to start training.")
+
+
+def run_cmd(cmd: list[str], *, label: str | None = None) -> None:
     print("[run]", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        stripped = line.rstrip()
+        if stripped:
+            print(stripped)
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd)
+
+
+def run_script(script_name: str, args: list[str], *, label: str | None = None) -> None:
+    run_cmd([sys.executable, f"scripts/{script_name}", *args], label=label)
 
 
 def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_dir: Path, log_dir: Path) -> dict[str, float | int | str]:
     if algo == "ppo":
-        run_cmd(
+        print(f"[info] Starting PPO training for seed {seed}")
+        run_script(
+            "train_ppo_sb3.py",
             [
-                sys.executable,
-                "scripts/train_ppo_sb3.py",
                 "--seed",
                 str(seed),
                 "--total-timesteps",
@@ -97,14 +114,17 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
                 str(log_dir),
                 "--device",
                 args.device,
-            ]
+                "--allow-training",
+            ],
+            label="ppo training",
         )
+        print(f"[info] PPO training completed for seed {seed}")
         model_path = output_dir / f"ppo_seed_{seed}.zip"
     else:
-        run_cmd(
+        print(f"[info] Starting DQN training for seed {seed}")
+        run_script(
+            "train_dqn_sb3.py",
             [
-                sys.executable,
-                "scripts/train_dqn_sb3.py",
                 "--seed",
                 str(seed),
                 "--total-timesteps",
@@ -121,167 +141,14 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
                 str(log_dir),
                 "--device",
                 args.device,
-            ]
+                "--allow-training",
+            ],
+            label="dqn training",
         )
+        print(f"[info] DQN training completed for seed {seed}")
         model_path = output_dir / f"dqn_seed_{seed}.zip"
 
     return {"algo": algo, "seed": seed, "model_path": str(model_path)}
-
-
-def _unwrap_observation(obs: object) -> object:
-    if isinstance(obs, tuple):
-        return obs[0]
-    return obs
-
-
-def _to_channel_first(obs: np.ndarray) -> np.ndarray:
-    # Training uses VecTransposeImage (HWC -> CHW), so keep inference consistent.
-    if obs.ndim == 3 and obs.shape[-1] in (1, 3, 4):
-        return np.transpose(obs, (2, 0, 1))
-    return obs
-
-
-def evaluate_model(algo: str, model_path: Path, episodes: int, output_dir: Path, log_dir: Path, device: str) -> tuple[float, float, float]:
-    resolved_path = model_path
-    if not resolved_path.exists() and resolved_path.suffix != ".zip":
-        resolved_path = resolved_path.with_suffix(".zip")
-    if not resolved_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-
-    if algo == "ppo":
-        from stable_baselines3 import PPO
-        import miniworld
-        from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
-
-        env = DummyVecEnv([lambda: gym.make("MiniWorld-FourRooms-v0")])
-        env = VecTransposeImage(env)
-        model = PPO.load(resolved_path, env=env, device=device)
-        returns = []
-        successes = 0
-        steps = []
-        for _ in range(episodes):
-            obs = env.reset()
-            done = False
-            truncated = False
-            ep_ret = 0.0
-            ep_steps = 0
-            while not (done or truncated):
-                obs_value = _unwrap_observation(obs)
-                action, _ = model.predict(np.asarray(obs_value), deterministic=True)
-                obs, reward, done_arr, _ = env.step(action)
-                done = bool(done_arr[0])
-                ep_ret += float(reward[0])
-                ep_steps += 1
-            returns.append(ep_ret)
-            steps.append(ep_steps)
-            if done and ep_ret > 0:
-                successes += 1
-        env.close()
-        return float(sum(returns) / len(returns)), successes / episodes, float(sum(steps) / len(steps))
-
-    from stable_baselines3 import DQN
-    import miniworld
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
-
-    env = DummyVecEnv([lambda: gym.make("MiniWorld-FourRooms-v0")])
-    env = VecTransposeImage(env)
-    model = DQN.load(resolved_path, env=env, device=device)
-    returns = []
-    successes = 0
-    steps = []
-    for _ in range(episodes):
-        obs = env.reset()
-        done = False
-        truncated = False
-        ep_ret = 0.0
-        ep_steps = 0
-        while not (done or truncated):
-            obs_value = _unwrap_observation(obs)
-            action, _ = model.predict(np.asarray(obs_value), deterministic=True)
-            obs, reward, done_arr, _ = env.step(action)
-            done = bool(done_arr[0])
-            ep_ret += float(reward[0])
-            ep_steps += 1
-        returns.append(ep_ret)
-        steps.append(ep_steps)
-        if done and ep_ret > 0:
-            successes += 1
-    env.close()
-    return float(sum(returns) / len(returns)), successes / episodes, float(sum(steps) / len(steps))
-
-
-def generate_video(algo: str, model_path: Path, output_dir: Path, episodes: int, device: str) -> None:
-    videos_dir = output_dir / "videos"
-    videos_dir.mkdir(parents=True, exist_ok=True)
-
-    if algo == "ppo":
-        from stable_baselines3 import PPO
-        model = PPO.load(model_path, device=device)
-    else:
-        from stable_baselines3 import DQN
-        model = DQN.load(model_path, device=device)
-
-    env = gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array")
-    frames = []
-    for episode_idx in range(episodes):
-        obs, info = env.reset(seed=episode_idx)
-        done = False
-        truncated = False
-        while not (done or truncated):
-            obs_for_model = _to_channel_first(np.asarray(obs))
-            action, _ = model.predict(obs_for_model, deterministic=True)
-            obs, reward, done, truncated, info = env.step(action)
-            frame = env.render()
-            if frame is None:
-                frame = np.zeros((64, 64, 3), dtype=np.uint8)
-            frames.append(np.asarray(frame))
-        if frames:
-            frames.append(frames[-1])
-
-    output_path = videos_dir / f"{algo}_{model_path.stem}.mp4"
-    imageio.mimsave(output_path, frames, fps=20)
-    env.close()
-
-
-def load_eval_curve(algo: str, run_name: str, log_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    eval_path = log_dir / algo / run_name / "evaluations.npz"
-    if not eval_path.exists():
-        raise FileNotFoundError(f"Evaluation file not found: {eval_path}")
-    data = np.load(eval_path)
-    timesteps = data["timesteps"]
-    results = data["results"]
-    mean_rewards = results.mean(axis=1)
-    return timesteps, mean_rewards
-
-
-def generate_plots(summary_path: Path, output_dir: Path, log_dir: Path) -> None:
-    df = pd.read_csv(summary_path)
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    plt.figure(figsize=(8, 4))
-    for algo in sorted(df["algo"].unique()):
-        seed_series = df.loc[df["algo"] == algo, "seed"]
-        seed_value = int(np.asarray(seed_series).reshape(-1)[0])
-        run_name = f"seed_{seed_value}"
-        timesteps, rewards = load_eval_curve(algo, run_name, log_dir)
-        plt.plot(timesteps, rewards, label=algo)
-    plt.xlabel("training timesteps")
-    plt.ylabel("evaluation reward")
-    plt.title("Reward vs training timesteps")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "reward_vs_timesteps.png")
-    plt.close()
-
-    plt.figure(figsize=(8, 4))
-    summary = df.groupby("algo")["mean_return"].mean()
-    summary.plot(kind="bar", color=["#1f77b4", "#ff7f0e"])
-    plt.ylabel("mean return")
-    plt.title("Final evaluation comparison")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "final_comparison.png")
-    plt.close()
 
 
 def validate_outputs(output_dir: Path) -> None:
@@ -301,14 +168,15 @@ def validate_outputs(output_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--ppo-steps", type=int, default=200_000)
-    parser.add_argument("--dqn-steps", type=int, default=200_000)
-    parser.add_argument("--eval-freq", type=int, default=20_000)
-    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--ppo-steps", type=int, default=100_000)
+    parser.add_argument("--dqn-steps", type=int, default=100_000)
+    parser.add_argument("--eval-freq", type=int, default=25_000)
+    parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--video-episodes", type=int, default=2)
+    parser.add_argument("--allow-training", action="store_true", help="Explicitly allow training/evaluation/video generation to run")
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--algo", choices=["ppo", "dqn"], default=None)
     parser.add_argument("--model-path", type=str, default=None)
@@ -332,6 +200,7 @@ def main() -> None:
         return
 
     validate_args(args)
+    require_training_permission(args.allow_training)
 
     output_dir = Path(args.output_dir)
     log_dir = Path(args.log_dir)
@@ -346,27 +215,65 @@ def main() -> None:
         result = train_and_evaluate(algo, seed, args, output_dir, log_dir)
         rows.append(result)
 
+    print("[info] Evaluating trained models")
     summary_path = output_dir / "summary.csv"
-    with summary_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["algo", "seed", "model_path", "mean_return", "success_rate", "mean_steps"])
-        writer.writeheader()
-        for row in rows:
-            algo = row["algo"]
-            model_path = Path(row["model_path"])
-            mean_return, success_rate, mean_steps = evaluate_model(algo, model_path, args.eval_episodes, output_dir, log_dir, device)
-            writer.writerow({
-                "algo": algo,
-                "seed": seed,
-                "model_path": str(model_path),
-                "mean_return": mean_return,
-                "success_rate": success_rate,
-                "mean_steps": mean_steps,
-            })
+    for row in rows:
+        print(f"[info] Evaluating {row['algo']}")
+        run_script(
+            "evaluate_model.py",
+            [
+                "--algo",
+                row["algo"],
+                "--model-path",
+                str(Path(row["model_path"])),
+                "--episodes",
+                str(args.eval_episodes),
+                "--output-dir",
+                str(output_dir),
+                "--log-dir",
+                str(log_dir),
+                "--device",
+                device,
+                "--seed",
+                str(seed),
+                "--summary-csv",
+                str(summary_path),
+            ],
+            label="evaluation",
+        )
 
     print(f"Saved summary to {summary_path}")
     for row in rows:
-        generate_video(row["algo"], Path(row["model_path"]), output_dir, args.video_episodes, device)
-    generate_plots(summary_path, output_dir, log_dir)
+        print(f"[info] Rendering video for {row['algo']}")
+        run_script(
+            "render_video.py",
+            [
+                "--algo",
+                row["algo"],
+                "--model-path",
+                str(Path(row["model_path"])),
+                "--episodes",
+                str(args.video_episodes),
+                "--output-dir",
+                str(output_dir),
+                "--device",
+                device,
+            ],
+            label="video rendering",
+        )
+
+    run_script(
+        "plot_results.py",
+        [
+            "--summary-csv",
+            str(summary_path),
+            "--output-dir",
+            str(output_dir),
+            "--log-dir",
+            str(log_dir),
+        ],
+        label="plot generation",
+    )
     validate_outputs(output_dir)
     print("All requested outputs generated.")
 

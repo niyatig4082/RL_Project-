@@ -16,7 +16,7 @@ import torch
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42])
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ppo-steps", type=int, default=200_000)
     parser.add_argument("--dqn-steps", type=int, default=200_000)
     parser.add_argument("--eval-freq", type=int, default=20_000)
@@ -58,8 +58,8 @@ def resolve_device(requested: str | None = None) -> str:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if not args.seeds:
-        raise ValueError("--seeds must include at least one seed")
+    if args.seed < 0:
+        raise ValueError("--seed must be >= 0")
     if args.ppo_steps <= 0:
         raise ValueError("--ppo-steps must be > 0")
     if args.dqn_steps <= 0:
@@ -131,6 +131,13 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
 def _unwrap_observation(obs: object) -> object:
     if isinstance(obs, tuple):
         return obs[0]
+    return obs
+
+
+def _to_channel_first(obs: np.ndarray) -> np.ndarray:
+    # Training uses VecTransposeImage (HWC -> CHW), so keep inference consistent.
+    if obs.ndim == 3 and obs.shape[-1] in (1, 3, 4):
+        return np.transpose(obs, (2, 0, 1))
     return obs
 
 
@@ -221,7 +228,8 @@ def generate_video(algo: str, model_path: Path, output_dir: Path, episodes: int,
         done = False
         truncated = False
         while not (done or truncated):
-            action, _ = model.predict(obs, deterministic=True)
+            obs_for_model = _to_channel_first(np.asarray(obs))
+            action, _ = model.predict(obs_for_model, deterministic=True)
             obs, reward, done, truncated, info = env.step(action)
             frame = env.render()
             if frame is None:
@@ -292,7 +300,7 @@ def validate_outputs(output_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42])
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ppo-steps", type=int, default=200_000)
     parser.add_argument("--dqn-steps", type=int, default=200_000)
     parser.add_argument("--eval-freq", type=int, default=20_000)
@@ -332,7 +340,7 @@ def main() -> None:
     device = resolve_device(args.device)
     print(f"[info] main router using device: {device}")
 
-    seed = args.seeds[0]
+    seed = args.seed
     rows = []
     for algo in ["ppo", "dqn"]:
         result = train_and_evaluate(algo, seed, args, output_dir, log_dir)

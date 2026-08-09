@@ -67,12 +67,31 @@ def make_env() -> gym.Env:
     return GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))
 
 
-def select_device() -> str:
-    if torch.cuda.is_available():
+def select_device(requested: str | None = None) -> str:
+    if requested in {None, "auto"}:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(0)
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    if requested == "cpu":
+        return "cpu"
+
+    if requested.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available, but a CUDA device was requested")
+        if ":" in requested:
+            device_idx = int(requested.split(":", 1)[1])
+            if device_idx >= torch.cuda.device_count():
+                raise RuntimeError(f"CUDA device index {device_idx} is not available")
+            torch.cuda.set_device(device_idx)
+            return requested
+        torch.cuda.set_device(0)
         return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+
+    raise ValueError(f"Unsupported device: {requested}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--frame-stack", type=int, default=1)
+    parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--n-steps", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -116,7 +136,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     validate_args(args)
-    device = select_device()
+    device = select_device(args.device)
     print(f"[info] PPO using device: {device}")
 
     run_name = args.run_name or f"seed_{args.seed}"
@@ -165,7 +185,9 @@ def main() -> None:
     )
 
     model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
-    model.save(output_dir / f"ppo_{run_name}")
+    artifact_path = output_dir / f"ppo_{run_name}.zip"
+    model.save(artifact_path)
+    print(f"[info] saved model to {artifact_path}")
 
     env.close()
     eval_env.close()

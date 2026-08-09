@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 import gymnasium as gym
+import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 
 
 class GoalDistanceRewardWrapper(gym.Wrapper):
@@ -74,7 +76,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-stack", type=int, default=1)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--video-episodes", type=int, default=2)
     return parser.parse_args()
+
+
+def resolve_device(requested: str | None = None) -> str:
+    if requested in {None, "auto"}:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(0)
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    if requested == "cpu":
+        return "cpu"
+
+    if requested.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available, but a CUDA device was requested")
+        if ":" in requested:
+            device_idx = int(requested.split(":", 1)[1])
+            if device_idx >= torch.cuda.device_count():
+                raise RuntimeError(f"CUDA device index {device_idx} is not available")
+            torch.cuda.set_device(device_idx)
+            return requested
+        torch.cuda.set_device(0)
+        return "cuda"
+
+    raise ValueError(f"Unsupported device: {requested}")
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -117,7 +148,7 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
                 f"seed_{seed}",
             ]
         )
-        model_path = output_dir / f"ppo_seed_{seed}"
+        model_path = output_dir / f"ppo_seed_{seed}.zip"
     else:
         run_cmd(
             [
@@ -135,6 +166,8 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
                 str(args.frame_stack),
                 "--run-name",
                 f"seed_{seed}",
+                "--device",
+                args.device,
             ]
         )
         model_path = output_dir / f"dqn_seed_{seed}.zip"
@@ -155,14 +188,19 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
         str(output_dir),
         "--log-dir",
         str(log_dir),
+        "--device",
+        args.device,
     ]
     run_cmd(eval_cmd)
 
     return {"algo": algo, "seed": seed, "model_path": str(model_path)}
 
 
-def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int, output_dir: Path, log_dir: Path) -> tuple[float, float, float]:
-    if not model_path.exists():
+def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int, output_dir: Path, log_dir: Path, device: str) -> tuple[float, float, float]:
+    resolved_path = model_path
+    if not resolved_path.exists() and resolved_path.suffix != ".zip":
+        resolved_path = resolved_path.with_suffix(".zip")
+    if not resolved_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
     if algo == "ppo":
@@ -174,7 +212,7 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
         env = VecTransposeImage(env)
         if frame_stack > 1:
             env = VecFrameStack(env, n_stack=frame_stack)
-        model = PPO.load(model_path, env=env)
+        model = PPO.load(resolved_path, env=env, device=device)
         returns = []
         successes = 0
         steps = []
@@ -205,7 +243,7 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
     env = VecTransposeImage(env)
     if frame_stack > 1:
         env = VecFrameStack(env, n_stack=frame_stack)
-    model = DQN.load(model_path, env=env)
+    model = DQN.load(resolved_path, env=env, device=device)
     returns = []
     successes = 0
     steps = []
@@ -227,6 +265,39 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
             successes += 1
     env.close()
     return float(sum(returns) / len(returns)), successes / episodes, float(sum(steps) / len(steps))
+
+
+def generate_video(algo: str, model_path: Path, output_dir: Path, episodes: int, device: str) -> None:
+    videos_dir = output_dir / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+
+    if algo == "ppo":
+        from stable_baselines3 import PPO
+        model = PPO.load(model_path, device=device)
+    else:
+        from stable_baselines3 import DQN
+        model = DQN.load(model_path, device=device)
+
+    env = gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array")
+    env = GoalDistanceRewardWrapper(env)
+    frames = []
+    for episode_idx in range(episodes):
+        obs, info = env.reset(seed=episode_idx)
+        done = False
+        truncated = False
+        while not (done or truncated):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            frame = env.render()
+            if frame is None:
+                frame = np.zeros((64, 64, 3), dtype=np.uint8)
+            frames.append(np.asarray(frame))
+        if frames:
+            frames.append(frames[-1])
+
+    output_path = videos_dir / f"{algo}_{model_path.stem}.mp4"
+    imageio.mimsave(output_path, frames, fps=20)
+    env.close()
 
 
 def generate_plots(summary_path: Path, output_dir: Path) -> None:
@@ -272,6 +343,9 @@ def validate_outputs(output_dir: Path) -> None:
         output_dir / "plots" / "final_success_rate.png",
         output_dir / "plots" / "final_mean_return.png",
     ]
+    video_dir = output_dir / "videos"
+    if not video_dir.exists() or not any(video_dir.glob("*.mp4")):
+        required.append(video_dir)
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError("Missing required outputs: " + ", ".join(missing))
@@ -287,6 +361,8 @@ def main() -> None:
     parser.add_argument("--frame-stack", type=int, default=1)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--video-episodes", type=int, default=2)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--algo", choices=["ppo", "dqn"], default=None)
     parser.add_argument("--model-path", type=str, default=None)
@@ -300,7 +376,8 @@ def main() -> None:
         log_dir = Path(args.log_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
-        mean_return, success_rate, mean_steps = evaluate_model(args.algo, Path(args.model_path), args.episodes, args.frame_stack, output_dir, log_dir)
+        device = resolve_device(args.device)
+        mean_return, success_rate, mean_steps = evaluate_model(args.algo, Path(args.model_path), args.episodes, args.frame_stack, output_dir, log_dir, device)
         print(f"algo: {args.algo}")
         print(f"episodes: {args.episodes}")
         print(f"mean_return: {mean_return:.4f}")
@@ -314,6 +391,8 @@ def main() -> None:
     log_dir = Path(args.log_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+    device = resolve_device(args.device)
+    print(f"[info] main router using device: {device}")
 
     rows = []
     for algo in ["ppo", "dqn"]:
@@ -328,6 +407,8 @@ def main() -> None:
         writer.writerows(rows)
 
     print(f"Saved summary to {summary_path}")
+    for row in rows:
+        generate_video(row["algo"], Path(row["model_path"]), output_dir, args.video_episodes, device)
     generate_plots(summary_path, output_dir)
     validate_outputs(output_dir)
     print("All requested outputs generated.")

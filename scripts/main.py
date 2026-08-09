@@ -14,58 +14,6 @@ import pandas as pd
 import torch
 
 
-class GoalDistanceRewardWrapper(gym.Wrapper):
-    """Add dense progress reward based on distance to the goal."""
-
-    def __init__(self, env: gym.Env, progress_scale: float = 0.5, step_penalty: float = 0.001, success_bonus: float = 10.0):
-        super().__init__(env)
-        self._prev_distance: float | None = None
-        self.progress_scale = progress_scale
-        self.step_penalty = step_penalty
-        self.success_bonus = success_bonus
-
-    def _get_goal_pos(self) -> np.ndarray:
-        env = self.env.unwrapped
-        entities = getattr(env, "entities", None) or []
-        for entity in entities:
-            color = getattr(entity, "color", None)
-            if color == "red":
-                return np.asarray(entity.pos, dtype=np.float32)
-        raise AttributeError("Environment does not expose a goal position")
-
-    def _get_agent_pos(self) -> np.ndarray:
-        agent = getattr(self.env.unwrapped, "agent", None)
-        if agent is not None:
-            return np.asarray(agent.pos, dtype=np.float32)
-        raise AttributeError("Environment does not expose an agent position")
-
-    def _distance_to_goal(self) -> float:
-        agent_pos = self._get_agent_pos()
-        goal_pos = self._get_goal_pos()
-        return float(np.linalg.norm(agent_pos - goal_pos))
-
-    def reset(self, *, seed=None, options=None):
-        obs, info = self.env.reset(seed=seed, options=options)
-        self._prev_distance = self._distance_to_goal()
-        return obs, info
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        distance = self._distance_to_goal()
-        if self._prev_distance is None:
-            shaped_reward = reward
-        else:
-            progress = self._prev_distance - distance
-            shaped_reward = float(reward) + self.progress_scale * progress - self.step_penalty
-            if distance < 1.0:
-                shaped_reward += self.success_bonus
-        self._prev_distance = distance
-        info = dict(info or {})
-        info["success"] = bool(terminated and distance < 1.0)
-        info["distance_to_goal"] = distance
-        return obs, shaped_reward, terminated, truncated, info
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42])
@@ -73,7 +21,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dqn-steps", type=int, default=200_000)
     parser.add_argument("--eval-freq", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument("--frame-stack", type=int, default=1)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
@@ -93,13 +40,15 @@ def resolve_device(requested: str | None = None) -> str:
     if requested == "cpu":
         return "cpu"
 
-    if requested.startswith("cuda"):
+    if requested is not None and requested.startswith("cuda"):
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available, but a CUDA device was requested")
+            print("[warn] CUDA was requested but is not available; falling back to CPU")
+            return "cpu"
         if ":" in requested:
             device_idx = int(requested.split(":", 1)[1])
             if device_idx >= torch.cuda.device_count():
-                raise RuntimeError(f"CUDA device index {device_idx} is not available")
+                print(f"[warn] CUDA device index {device_idx} is not available; falling back to CPU")
+                return "cpu"
             torch.cuda.set_device(device_idx)
             return requested
         torch.cuda.set_device(0)
@@ -119,8 +68,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--eval-freq must be > 0")
     if args.eval_episodes <= 0:
         raise ValueError("--eval-episodes must be > 0")
-    if args.frame_stack <= 0:
-        raise ValueError("--frame-stack must be > 0")
 
 
 def run_cmd(cmd: list[str]) -> None:
@@ -142,10 +89,14 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
                 str(args.eval_freq),
                 "--eval-episodes",
                 str(args.eval_episodes),
-                "--frame-stack",
-                str(args.frame_stack),
                 "--run-name",
                 f"seed_{seed}",
+                "--output-dir",
+                str(output_dir),
+                "--log-dir",
+                str(log_dir),
+                "--device",
+                args.device,
             ]
         )
         model_path = output_dir / f"ppo_seed_{seed}.zip"
@@ -162,41 +113,28 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
                 str(args.eval_freq),
                 "--eval-episodes",
                 str(args.eval_episodes),
-                "--frame-stack",
-                str(args.frame_stack),
                 "--run-name",
                 f"seed_{seed}",
+                "--output-dir",
+                str(output_dir),
+                "--log-dir",
+                str(log_dir),
                 "--device",
                 args.device,
             ]
         )
         model_path = output_dir / f"dqn_seed_{seed}.zip"
 
-    eval_cmd = [
-        sys.executable,
-        "scripts/main.py",
-        "--eval-only",
-        "--algo",
-        algo,
-        "--model-path",
-        str(model_path),
-        "--episodes",
-        str(args.eval_episodes),
-        "--frame-stack",
-        str(args.frame_stack),
-        "--output-dir",
-        str(output_dir),
-        "--log-dir",
-        str(log_dir),
-        "--device",
-        args.device,
-    ]
-    run_cmd(eval_cmd)
-
     return {"algo": algo, "seed": seed, "model_path": str(model_path)}
 
 
-def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int, output_dir: Path, log_dir: Path, device: str) -> tuple[float, float, float]:
+def _unwrap_observation(obs: object) -> object:
+    if isinstance(obs, tuple):
+        return obs[0]
+    return obs
+
+
+def evaluate_model(algo: str, model_path: Path, episodes: int, output_dir: Path, log_dir: Path, device: str) -> tuple[float, float, float]:
     resolved_path = model_path
     if not resolved_path.exists() and resolved_path.suffix != ".zip":
         resolved_path = resolved_path.with_suffix(".zip")
@@ -206,12 +144,10 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
     if algo == "ppo":
         from stable_baselines3 import PPO
         import miniworld
-        from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
+        from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 
-        env = DummyVecEnv([lambda: GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))])
+        env = DummyVecEnv([lambda: gym.make("MiniWorld-FourRooms-v0")])
         env = VecTransposeImage(env)
-        if frame_stack > 1:
-            env = VecFrameStack(env, n_stack=frame_stack)
         model = PPO.load(resolved_path, env=env, device=device)
         returns = []
         successes = 0
@@ -223,7 +159,8 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
             ep_ret = 0.0
             ep_steps = 0
             while not (done or truncated):
-                action, _ = model.predict(obs, deterministic=True)
+                obs_value = _unwrap_observation(obs)
+                action, _ = model.predict(np.asarray(obs_value), deterministic=True)
                 obs, reward, done_arr, _ = env.step(action)
                 done = bool(done_arr[0])
                 ep_ret += float(reward[0])
@@ -237,12 +174,10 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
 
     from stable_baselines3 import DQN
     import miniworld
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 
-    env = DummyVecEnv([lambda: GoalDistanceRewardWrapper(gym.make("MiniWorld-FourRooms-v0"))])
+    env = DummyVecEnv([lambda: gym.make("MiniWorld-FourRooms-v0")])
     env = VecTransposeImage(env)
-    if frame_stack > 1:
-        env = VecFrameStack(env, n_stack=frame_stack)
     model = DQN.load(resolved_path, env=env, device=device)
     returns = []
     successes = 0
@@ -254,7 +189,8 @@ def evaluate_model(algo: str, model_path: Path, episodes: int, frame_stack: int,
         ep_ret = 0.0
         ep_steps = 0
         while not (done or truncated):
-            action, _ = model.predict(obs, deterministic=True)
+            obs_value = _unwrap_observation(obs)
+            action, _ = model.predict(np.asarray(obs_value), deterministic=True)
             obs, reward, done_arr, _ = env.step(action)
             done = bool(done_arr[0])
             ep_ret += float(reward[0])
@@ -279,7 +215,6 @@ def generate_video(algo: str, model_path: Path, output_dir: Path, episodes: int,
         model = DQN.load(model_path, device=device)
 
     env = gym.make("MiniWorld-FourRooms-v0", render_mode="rgb_array")
-    env = GoalDistanceRewardWrapper(env)
     frames = []
     for episode_idx in range(episodes):
         obs, info = env.reset(seed=episode_idx)
@@ -300,48 +235,52 @@ def generate_video(algo: str, model_path: Path, output_dir: Path, episodes: int,
     env.close()
 
 
-def generate_plots(summary_path: Path, output_dir: Path) -> None:
+def load_eval_curve(algo: str, run_name: str, log_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    eval_path = log_dir / algo / run_name / "evaluations.npz"
+    if not eval_path.exists():
+        raise FileNotFoundError(f"Evaluation file not found: {eval_path}")
+    data = np.load(eval_path)
+    timesteps = data["timesteps"]
+    results = data["results"]
+    mean_rewards = results.mean(axis=1)
+    return timesteps, mean_rewards
+
+
+def generate_plots(summary_path: Path, output_dir: Path, log_dir: Path) -> None:
     df = pd.read_csv(summary_path)
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(8, 4))
     for algo in sorted(df["algo"].unique()):
-        subset = df[df["algo"] == algo]
-        plt.plot(subset["seed"], subset["mean_return"], marker="o", label=algo)
-    plt.xlabel("seed")
-    plt.ylabel("mean return")
-    plt.title("Mean return by seed")
+        seed_series = df.loc[df["algo"] == algo, "seed"]
+        seed_value = int(np.asarray(seed_series).reshape(-1)[0])
+        run_name = f"seed_{seed_value}"
+        timesteps, rewards = load_eval_curve(algo, run_name, log_dir)
+        plt.plot(timesteps, rewards, label=algo)
+    plt.xlabel("training timesteps")
+    plt.ylabel("evaluation reward")
+    plt.title("Reward vs training timesteps")
     plt.legend()
     plt.tight_layout()
     plt.savefig(plots_dir / "reward_vs_timesteps.png")
     plt.close()
 
     plt.figure(figsize=(8, 4))
-    summary = df.groupby("algo")["success_rate"].mean()
-    summary.plot(kind="bar", color=["#1f77b4", "#ff7f0e"])
-    plt.ylabel("success rate")
-    plt.title("Mean success rate")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "final_success_rate.png")
-    plt.close()
-
-    plt.figure(figsize=(8, 4))
     summary = df.groupby("algo")["mean_return"].mean()
     summary.plot(kind="bar", color=["#1f77b4", "#ff7f0e"])
     plt.ylabel("mean return")
-    plt.title("Mean return")
+    plt.title("Final evaluation comparison")
     plt.tight_layout()
-    plt.savefig(plots_dir / "final_mean_return.png")
+    plt.savefig(plots_dir / "final_comparison.png")
     plt.close()
 
 
 def validate_outputs(output_dir: Path) -> None:
     required = [
-        output_dir / "multiseed_summary.csv",
+        output_dir / "summary.csv",
         output_dir / "plots" / "reward_vs_timesteps.png",
-        output_dir / "plots" / "final_success_rate.png",
-        output_dir / "plots" / "final_mean_return.png",
+        output_dir / "plots" / "final_comparison.png",
     ]
     video_dir = output_dir / "videos"
     if not video_dir.exists() or not any(video_dir.glob("*.mp4")):
@@ -358,7 +297,6 @@ def main() -> None:
     parser.add_argument("--dqn-steps", type=int, default=200_000)
     parser.add_argument("--eval-freq", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument("--frame-stack", type=int, default=1)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
@@ -377,7 +315,7 @@ def main() -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
         device = resolve_device(args.device)
-        mean_return, success_rate, mean_steps = evaluate_model(args.algo, Path(args.model_path), args.episodes, args.frame_stack, output_dir, log_dir, device)
+        mean_return, success_rate, mean_steps = evaluate_model(args.algo, Path(args.model_path), args.episodes, output_dir, log_dir, device)
         print(f"algo: {args.algo}")
         print(f"episodes: {args.episodes}")
         print(f"mean_return: {mean_return:.4f}")
@@ -394,22 +332,33 @@ def main() -> None:
     device = resolve_device(args.device)
     print(f"[info] main router using device: {device}")
 
+    seed = args.seeds[0]
     rows = []
     for algo in ["ppo", "dqn"]:
-        for seed in args.seeds:
-            result = train_and_evaluate(algo, seed, args, output_dir, log_dir)
-            rows.append(result)
+        result = train_and_evaluate(algo, seed, args, output_dir, log_dir)
+        rows.append(result)
 
-    summary_path = output_dir / "multiseed_summary.csv"
+    summary_path = output_dir / "summary.csv"
     with summary_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["algo", "seed", "model_path"])
+        writer = csv.DictWriter(f, fieldnames=["algo", "seed", "model_path", "mean_return", "success_rate", "mean_steps"])
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            algo = row["algo"]
+            model_path = Path(row["model_path"])
+            mean_return, success_rate, mean_steps = evaluate_model(algo, model_path, args.eval_episodes, output_dir, log_dir, device)
+            writer.writerow({
+                "algo": algo,
+                "seed": seed,
+                "model_path": str(model_path),
+                "mean_return": mean_return,
+                "success_rate": success_rate,
+                "mean_steps": mean_steps,
+            })
 
     print(f"Saved summary to {summary_path}")
     for row in rows:
         generate_video(row["algo"], Path(row["model_path"]), output_dir, args.video_episodes, device)
-    generate_plots(summary_path, output_dir)
+    generate_plots(summary_path, output_dir, log_dir)
     validate_outputs(output_dir)
     print("All requested outputs generated.")
 

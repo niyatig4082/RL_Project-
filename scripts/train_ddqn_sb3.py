@@ -5,53 +5,14 @@ from pathlib import Path
 
 import gymnasium as gym
 import miniworld
-import numpy as np
 import torch
-import torch as th
 from PIL import Image
 from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
-from torch.nn import functional as F
 
 from reward_wrappers import StrictGoalRewardWrapper
-
-
-class DoubleDQN(DQN):
-    """SB3 DQN variant with Double DQN target computation."""
-
-    def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        self.policy.set_training_mode(True)
-        self._update_learning_rate(self.policy.optimizer)
-
-        losses: list[float] = []
-        for _ in range(gradient_steps):
-            replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
-            discounts = replay_data.discounts if replay_data.discounts is not None else self.gamma
-
-            with th.no_grad():
-                # Double DQN target: argmax from online network, value from target network.
-                next_q_online = self.q_net(replay_data.next_observations)
-                next_actions = next_q_online.argmax(dim=1, keepdim=True)
-                next_q_target = self.q_net_target(replay_data.next_observations)
-                next_q_values = th.gather(next_q_target, dim=1, index=next_actions)
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * discounts * next_q_values
-
-            current_q_values = self.q_net(replay_data.observations)
-            current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
-
-            loss = F.smooth_l1_loss(current_q_values, target_q_values)
-            losses.append(loss.item())
-
-            self.policy.optimizer.zero_grad()
-            loss.backward()
-            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.policy.optimizer.step()
-
-        self._n_updates += gradient_steps
-        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/loss", np.mean(losses))
 
 
 def ensure_miniworld_textures() -> None:
@@ -108,9 +69,9 @@ def select_device(requested: str | None = None) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Double DQN on MiniWorld FourRooms")
+    parser = argparse.ArgumentParser(description="Train DDQN baseline on MiniWorld FourRooms")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--total-timesteps", type=int, default=250_000)
+    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
@@ -118,19 +79,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--allow-training", action="store_true", help="Explicitly allow DDQN training to start")
+    parser.add_argument(
+        "--checkpoint-total-steps",
+        type=int,
+        default=250_000,
+        help="Approximate global step interval for DDQN checkpoints.",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--buffer-size", type=int, default=100_000)
     parser.add_argument("--learning-starts", type=int, default=10_000)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--train-freq", type=int, default=1)
+    parser.add_argument("--train-freq", type=int, default=4)
     parser.add_argument("--gradient-steps", type=int, default=1)
     parser.add_argument("--target-update-interval", type=int, default=1_000)
-    parser.add_argument("--exploration-fraction", type=float, default=0.4)
+    parser.add_argument("--exploration-fraction", type=float, default=0.3)
     parser.add_argument("--exploration-initial-eps", type=float, default=1.0)
     parser.add_argument("--exploration-final-eps", type=float, default=0.05)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--net-arch", nargs="+", type=int, default=[128, 128])
+    parser.add_argument(
+        "--optimize-memory-usage",
+        action="store_true",
+        help="Enable memory-efficient replay buffer mode.",
+    )
     return parser.parse_args()
 
 
@@ -141,6 +113,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--eval-freq must be > 0")
     if args.eval_episodes <= 0:
         raise ValueError("--eval-episodes must be > 0")
+    if args.checkpoint_total_steps <= 0:
+        raise ValueError("--checkpoint-total-steps must be > 0")
     if args.learning_rate <= 0:
         raise ValueError("--learning-rate must be > 0")
     if args.buffer_size <= 0:
@@ -195,7 +169,7 @@ def main() -> None:
 
     policy_kwargs = dict(net_arch=list(args.net_arch))
 
-    model = DoubleDQN(
+    model = DQN(
         policy="CnnPolicy",
         env=env,
         learning_rate=args.learning_rate,
@@ -210,6 +184,7 @@ def main() -> None:
         exploration_fraction=args.exploration_fraction,
         exploration_initial_eps=args.exploration_initial_eps,
         exploration_final_eps=args.exploration_final_eps,
+        optimize_memory_usage=args.optimize_memory_usage,
         policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log=str(Path(args.log_dir) / "ddqn"),
@@ -227,7 +202,17 @@ def main() -> None:
         render=False,
     )
 
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(args.checkpoint_total_steps, 1),
+        save_path=str(eval_log_dir / "checkpoints"),
+        name_prefix="ddqn_baseline",
+    )
+
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        progress_bar=False,
+        callback=[eval_callback, checkpoint_callback],
+    )
     artifact_path = output_dir / f"ddqn_{run_name}.zip"
     model.save(artifact_path)
     print(f"[info] saved model to {artifact_path}")

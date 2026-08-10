@@ -6,7 +6,7 @@ import miniworld
 import torch
 from PIL import Image
 from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
@@ -69,7 +69,7 @@ def select_device(requested: str | None = None) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train DQN on MiniWorld FourRooms")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--total-timesteps", type=int, default=250_000)
+    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
@@ -77,19 +77,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--allow-training", action="store_true", help="Explicitly allow DQN training to start")
+    parser.add_argument(
+        "--checkpoint-total-steps",
+        type=int,
+        default=250_000,
+        help="Approximate global step interval for DQN checkpoints.",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--buffer-size", type=int, default=100_000)
     parser.add_argument("--learning-starts", type=int, default=10_000)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--train-freq", type=int, default=1)
+    parser.add_argument("--train-freq", type=int, default=4)
     parser.add_argument("--gradient-steps", type=int, default=1)
     parser.add_argument("--target-update-interval", type=int, default=1_000)
-    parser.add_argument("--exploration-fraction", type=float, default=0.4)
+    parser.add_argument("--exploration-fraction", type=float, default=0.3)
     parser.add_argument("--exploration-initial-eps", type=float, default=1.0)
     parser.add_argument("--exploration-final-eps", type=float, default=0.05)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--net-arch", nargs="+", type=int, default=[128, 128])
+    parser.add_argument(
+        "--optimize-memory-usage",
+        action="store_true",
+        help="Enable memory-efficient replay buffer mode.",
+    )
     return parser.parse_args()
 
 
@@ -100,6 +111,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--eval-freq must be > 0")
     if args.eval_episodes <= 0:
         raise ValueError("--eval-episodes must be > 0")
+    if args.checkpoint_total_steps <= 0:
+        raise ValueError("--checkpoint-total-steps must be > 0")
     if args.learning_rate <= 0:
         raise ValueError("--learning-rate must be > 0")
     if args.buffer_size <= 0:
@@ -169,6 +182,7 @@ def main() -> None:
         exploration_fraction=args.exploration_fraction,
         exploration_initial_eps=args.exploration_initial_eps,
         exploration_final_eps=args.exploration_final_eps,
+        optimize_memory_usage=args.optimize_memory_usage,
         policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log=str(Path(args.log_dir) / "dqn"),
@@ -186,7 +200,17 @@ def main() -> None:
         render=False,
     )
 
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(args.checkpoint_total_steps, 1),
+        save_path=str(eval_log_dir / "checkpoints"),
+        name_prefix="dqn_fourrooms",
+    )
+
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        progress_bar=False,
+        callback=[eval_callback, checkpoint_callback],
+    )
     artifact_path = output_dir / f"dqn_{run_name}.zip"
     model.save(artifact_path)
     print(f"[info] saved model to {artifact_path}")

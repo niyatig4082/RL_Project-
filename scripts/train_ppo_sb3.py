@@ -6,9 +6,9 @@ import miniworld
 import torch
 from PIL import Image
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecTransposeImage
 
 from reward_wrappers import StrictGoalRewardWrapper
 
@@ -69,7 +69,8 @@ def select_device(requested: str | None = None) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO on MiniWorld FourRooms")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--total-timesteps", type=int, default=500_000)
+    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
+    parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--run-name", type=str, default=None)
@@ -77,24 +78,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--allow-training", action="store_true", help="Explicitly allow PPO training to start")
+    parser.add_argument(
+        "--checkpoint-total-steps",
+        type=int,
+        default=100_000,
+        help="Approximate global step interval for PPO checkpoints.",
+    )
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
-    parser.add_argument("--n-steps", type=int, default=2560)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--n-epochs", type=int, default=10)
-    parser.add_argument("--gamma", type=float, default=0.995)
+    parser.add_argument("--n-steps", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--n-epochs", type=int, default=4)
+    parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.97)
     parser.add_argument("--clip-range", type=float, default=0.2)
-    parser.add_argument("--ent-coef", type=float, default=0.0005)
+    parser.add_argument("--ent-coef", type=float, default=0.01)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
     if args.total_timesteps <= 0:
         raise ValueError("--total-timesteps must be > 0")
+    if args.n_envs <= 0:
+        raise ValueError("--n-envs must be > 0")
     if args.eval_freq <= 0:
         raise ValueError("--eval-freq must be > 0")
     if args.eval_episodes <= 0:
         raise ValueError("--eval-episodes must be > 0")
+    if args.checkpoint_total_steps <= 0:
+        raise ValueError("--checkpoint-total-steps must be > 0")
     if args.learning_rate <= 0:
         raise ValueError("--learning-rate must be > 0")
     if args.n_steps <= 0:
@@ -120,13 +131,23 @@ def main() -> None:
     eval_log_dir = Path(args.log_dir) / "ppo" / run_name
     eval_log_dir.mkdir(parents=True, exist_ok=True)
 
-    env = DummyVecEnv([make_env])
+    def make_train_env(rank: int):
+        def _init():
+            env = make_env()
+            env.reset(seed=args.seed + rank)
+            return env
+
+        return _init
+
+    if args.n_envs == 1:
+        env = DummyVecEnv([make_train_env(0)])
+    else:
+        env = SubprocVecEnv([make_train_env(i) for i in range(args.n_envs)])
     env = VecTransposeImage(env)
     env = VecFrameStack(env, n_stack=4)
     eval_env = DummyVecEnv([lambda: Monitor(make_env())])
     eval_env = VecTransposeImage(eval_env)
     eval_env = VecFrameStack(eval_env, n_stack=4)
-    env.seed(args.seed)
     eval_env.seed(args.seed + 1)
 
     model = PPO(
@@ -156,7 +177,14 @@ def main() -> None:
         render=False,
     )
 
-    model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=eval_callback)
+    checkpoint_steps_per_env = max(args.checkpoint_total_steps // args.n_envs, 1)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=checkpoint_steps_per_env,
+        save_path=str(eval_log_dir / "checkpoints"),
+        name_prefix="ppo_fourrooms",
+    )
+
+    model.learn(total_timesteps=args.total_timesteps, progress_bar=False, callback=[eval_callback, checkpoint_callback])
     artifact_path = output_dir / f"ppo_{run_name}.zip"
     model.save(artifact_path)
     print(f"[info] saved model to {artifact_path}")

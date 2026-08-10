@@ -129,7 +129,8 @@ def render_video(
                 frames.append(frames[-1])
 
     output_path = videos_dir / f"{algo}_{model_path.stem}.mp4"
-    imageio.mimsave(output_path, frames, fps=20)
+    # Preserve the original MiniWorld frame size (800x600) instead of auto-resizing to codec macro blocks.
+    imageio.mimsave(output_path, frames, fps=20, macro_block_size=1)
     render_env.close()
     model_env.close()
 

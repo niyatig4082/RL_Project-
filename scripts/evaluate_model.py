@@ -155,8 +155,8 @@ def evaluate_model(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a trained PPO or DQN model")
-    parser.add_argument("--algo", choices=["ppo", "dqn"], required=True)
+    parser = argparse.ArgumentParser(description="Evaluate a trained PPO, DQN, or DDQN model")
+    parser.add_argument("--algo", choices=["ppo", "dqn", "ddqn"], required=True)
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--output-dir", type=str, default="outputs")

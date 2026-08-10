@@ -9,7 +9,7 @@ from evaluate_model import evaluate_model
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
+    parser = argparse.ArgumentParser(description="Train PPO, DQN, and DDQN, evaluate them, and generate summary artifacts")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ppo-steps", type=int, default=500_000)
     parser.add_argument("--dqn-steps", type=int, default=250_000)
@@ -58,6 +58,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--ppo-steps must be > 0")
     if args.dqn_steps <= 0:
         raise ValueError("--dqn-steps must be > 0")
+    if args.ddqn_steps <= 0:
+        raise ValueError("--ddqn-steps must be > 0")
     if args.eval_freq <= 0:
         raise ValueError("--eval-freq must be > 0")
     if args.eval_episodes <= 0:
@@ -120,7 +122,7 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
         )
         print(f"[info] PPO training completed for seed {seed}")
         model_path = output_dir / f"ppo_seed_{seed}.zip"
-    else:
+    elif algo == "dqn":
         print(f"[info] Starting DQN training for seed {seed}")
         run_script(
             "train_dqn_sb3.py",
@@ -147,6 +149,33 @@ def train_and_evaluate(algo: str, seed: int, args: argparse.Namespace, output_di
         )
         print(f"[info] DQN training completed for seed {seed}")
         model_path = output_dir / f"dqn_seed_{seed}.zip"
+    else:
+        print(f"[info] Starting DDQN training for seed {seed}")
+        run_script(
+            "train_ddqn_sb3.py",
+            [
+                "--seed",
+                str(seed),
+                "--total-timesteps",
+                str(args.ddqn_steps),
+                "--eval-freq",
+                str(args.eval_freq),
+                "--eval-episodes",
+                str(args.eval_episodes),
+                "--run-name",
+                f"seed_{seed}",
+                "--output-dir",
+                str(output_dir),
+                "--log-dir",
+                str(log_dir),
+                "--device",
+                args.device,
+                "--allow-training",
+            ],
+            label="ddqn training",
+        )
+        print(f"[info] DDQN training completed for seed {seed}")
+        model_path = output_dir / f"ddqn_seed_{seed}.zip"
 
     return {"algo": algo, "seed": seed, "model_path": str(model_path)}
 
@@ -166,10 +195,11 @@ def validate_outputs(output_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train PPO and DQN, evaluate them, and generate summary artifacts")
+    parser = argparse.ArgumentParser(description="Train PPO, DQN, and DDQN, evaluate them, and generate summary artifacts")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ppo-steps", type=int, default=100_000)
     parser.add_argument("--dqn-steps", type=int, default=100_000)
+    parser.add_argument("--ddqn-steps", type=int, default=100_000)
     parser.add_argument("--eval-freq", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument("--output-dir", type=str, default="outputs")
@@ -177,8 +207,9 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--video-episodes", type=int, default=2)
     parser.add_argument("--allow-training", action="store_true", help="Explicitly allow training/evaluation/video generation to run")
+    parser.add_argument("--algos", nargs="+", choices=["ppo", "dqn", "ddqn"], default=["ppo", "dqn"])
     parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--algo", choices=["ppo", "dqn"], default=None)
+    parser.add_argument("--algo", choices=["ppo", "dqn", "ddqn"], default=None)
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--episodes", type=int, default=None)
     args = parser.parse_args()
@@ -211,7 +242,7 @@ def main() -> None:
 
     seed = args.seed
     rows = []
-    for algo in ["ppo", "dqn"]:
+    for algo in args.algos:
         result = train_and_evaluate(algo, seed, args, output_dir, log_dir)
         rows.append(result)
 

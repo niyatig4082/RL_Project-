@@ -84,8 +84,8 @@ def render_video(algo: str, model_path: Path, output_dir: Path, episodes: int, d
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render evaluation videos for a trained PPO or DQN model")
-    parser.add_argument("--algo", choices=["ppo", "dqn"], required=True)
+    parser = argparse.ArgumentParser(description="Render evaluation videos for a trained PPO, DQN, or DDQN model")
+    parser.add_argument("--algo", choices=["ppo", "dqn", "ddqn"], required=True)
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--output-dir", type=str, default="outputs")

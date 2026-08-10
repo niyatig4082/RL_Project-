@@ -7,28 +7,14 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 import torch
-from PIL import Image
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
 import miniworld
 
 
 def ensure_miniworld_textures() -> None:
-    texture_dir = Path(miniworld.__file__).resolve().parent / "textures"
-    texture_dir.mkdir(parents=True, exist_ok=True)
-    required = {
-        "concrete": (120, 120, 120),
-        "concrete_tiles": (140, 140, 140),
-        "brick_wall": (170, 90, 60),
-        "floor_tiles_bw": (100, 100, 100),
-        "asphalt": (60, 60, 60),
-    }
-    for name, color in required.items():
-        target = texture_dir / f"{name}_1.png"
-        if target.exists():
-            continue
-        img = Image.new("RGB", (64, 64), color)
-        img.save(target)
+    # Use MiniWorld's packaged textures as-is for consistent/default rendering.
+    return
 
 
 def _make_eval_env(render_mode: str | None = None) -> gym.Env:
